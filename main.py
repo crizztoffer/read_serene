@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapapiclient.errors import HttpError
+from googleapiclient.errors import HttpError
 from flask_cors import CORS # For allowing requests from your GoDaddy domain
 
 app = Flask(__name__)
