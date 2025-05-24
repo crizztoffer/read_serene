@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError # <-- Corrected typo here
+from googleapiclient.errors import HttpError
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -40,11 +40,14 @@ def extract_text_from_elements(elements):
                 if 'textRun' in text_run:
                     text_content += text_run['textRun']['content']
         elif 'table' in element:
+            # Recursively extract content from table cells
             for row in element['table']['tableRows']:
-                for cell in row['table']['tableCells']: # Accessing 'tableCells' key
+                for cell in row['tableCells']:
                     text_content += extract_text_from_elements(cell['content']) + " | "
             text_content += "\n"
     return text_content
+
+---
 
 # --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
@@ -62,26 +65,19 @@ def get_document_content():
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API (CORRECTED ID) ***
-    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI'
+    # *** DOCUMENT ID IS HARDCODED IN PYTHON API ***
+    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI' # Confirmed correct ID
 
     try:
         service = get_docs_service()
         app.logger.info(f"Fetching document with ID: {document_id}")
+        # Make sure includeTabsContent=True is still there
         document = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
-        # --- IMPORTANT DEBUGGING LOGS ---
+        # --- DEBUGGING LOGS ---
         app.logger.info(f"Document fetched. Top-level keys: {list(document.keys())}")
-
-        if 'body' not in document:
-            app.logger.error("Document object missing 'body' key.")
-            app.logger.error(f"Full document response (first 500 chars): {json.dumps(document, indent=2)[:500]}...")
-            raise KeyError("Document response is missing the 'body' key. Check document permissions or structure.")
-
-        if 'content' not in document['body']:
-            app.logger.error("Document 'body' object missing 'content' key.")
-            app.logger.error(f"Full document body response (first 500 chars): {json.dumps(document['body'], indent=2)[:500]}...")
-            raise KeyError("Document 'body' is missing the 'content' key. Check document structure.")
+        # Only log first 1000 characters to prevent overwhelming logs
+        app.logger.info(f"Full document response (first 1000 chars): {json.dumps(document, indent=2)[:1000]}...")
         # --- END DEBUGGING LOGS ---
 
         parsed_data = {
@@ -89,114 +85,179 @@ def get_document_content():
             "books": []
         }
 
-        doc_tabs = []
-        if 'documentStyle' in document and 'documentTabProperties' in document['documentStyle']:
-            doc_tabs = document['documentStyle']['documentTabProperties']
+        # --- MODIFIED LOGIC FOR HANDLING TABS ---
+        if 'tabs' in document and document['tabs']:
+            for i, tab_data in enumerate(document['tabs']):
+                tab_properties = tab_data.get('tabProperties', {})
+                document_tab = tab_data.get('documentTab', {})
+                tab_body = document_tab.get('body', {})
+                tab_content = tab_body.get('content', [])
 
-        if not doc_tabs:
-            app.logger.warning("No DocumentTabProperties found. Processing as a single 'Main Document'.")
-            parsed_data['books'].append({
-                "title": "Main Document",
+                book_entry = {
+                    "title": tab_properties.get('title', f"Tab {i+1}"),
+                    "id": f"tab-{tab_properties.get('tabId', f'tab_{i+1}').replace('.', '_')}", # Use tabId or generate
+                    "startIndex": tab_properties.get('range', {}).get('startIndex', 0),
+                    "endIndex": tab_properties.get('range', {}).get('endIndex', 0),
+                    "chapters": []
+                }
+
+                current_chapter = None
+                chapter_counter = 0
+
+                for element in tab_content: # Iterate through content of the current tab
+                    start_index = element.get('startIndex', 0)
+                    end_index = element.get('endIndex', 0)
+
+                    if 'paragraph' in element:
+                        paragraph = element['paragraph']
+                        named_style_type = paragraph.get('paragraphStyle', {}).get('namedStyleType')
+                        text_run_content = extract_text_from_elements([element])
+
+                        if named_style_type == 'HEADING_1':
+                            if current_chapter:
+                                book_entry['chapters'].append(current_chapter)
+                            chapter_counter += 1
+                            current_chapter = {
+                                "number": text_run_content.strip(),
+                                "title": "",
+                                "content": "",
+                                "id": f"chapter-{book_entry['id']}-{chapter_counter}" # Unique ID per chapter within book
+                            }
+                        elif named_style_type == 'SUBTITLE':
+                            if current_chapter and not current_chapter['title']:
+                                current_chapter['title'] = text_run_content.strip()
+                            else:
+                                if current_chapter:
+                                    current_chapter['content'] += text_run_content
+                                else:
+                                    # If subtitle without preceding H1, treat as part of an intro chapter
+                                    if not book_entry['chapters'] and not current_chapter:
+                                        chapter_counter += 1
+                                        current_chapter = {
+                                            "number": "0", "title": "Introduction", "content": "",
+                                            "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                        }
+                                        book_entry['chapters'].append(current_chapter)
+                                    if current_chapter: # Ensure current_chapter is set
+                                        current_chapter['content'] += text_run_content
+                        else:
+                            if current_chapter:
+                                current_chapter['content'] += text_run_content
+                            else:
+                                # If general text without a heading, add to an 'Introduction' chapter if none exists
+                                if not book_entry['chapters'] and not current_chapter:
+                                    chapter_counter += 1
+                                    current_chapter = {
+                                        "number": "0", "title": "Introduction", "content": "",
+                                        "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                    }
+                                    book_entry['chapters'].append(current_chapter)
+                                if current_chapter: # Ensure current_chapter is set
+                                    current_chapter['content'] += text_run_content
+                    else: # Handle non-paragraph elements like tables directly
+                        element_text = extract_text_from_elements([element])
+                        if current_chapter:
+                            current_chapter['content'] += element_text
+                        else:
+                            # If no chapter, add to an 'Introduction' chapter
+                            if not book_entry['chapters'] and not current_chapter:
+                                chapter_counter += 1
+                                current_chapter = {
+                                    "number": "0", "title": "Introduction", "content": "",
+                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                }
+                                book_entry['chapters'].append(current_chapter)
+                            if current_chapter:
+                                current_chapter['content'] += element_text
+
+                if current_chapter:
+                    book_entry['chapters'].append(current_chapter)
+
+                parsed_data['books'].append(book_entry)
+        else:
+            # Fallback for documents without explicit 'tabs' (or if includeTabsContent is False)
+            app.logger.warning("No 'tabs' found in document response. Assuming single main body.")
+            main_body_content = document.get('body', {}).get('content', [])
+            
+            single_book_entry = {
+                "title": document.get('title', 'Main Document'),
                 "id": "tab-main",
                 "startIndex": 0,
                 "endIndex": len(json.dumps(document)), # Placeholder, actual end index of doc body
                 "chapters": []
-            })
-            current_tab_index = 0
-        else:
-            for i, tab in enumerate(doc_tabs):
-                parsed_data['books'].append({
-                    "title": tab.get('title', f"Tab {i+1}"),
-                    "id": f"tab-{tab.get('title', f'tab_{i+1}').replace(' ', '_').lower()}",
-                    "startIndex": tab['range']['startIndex'],
-                    "endIndex": tab['range']['endIndex'],
-                    "chapters": []
-                })
-            current_tab_index = -1
+            }
 
-        current_chapter = None
-        chapter_counter = 0
+            current_chapter = None
+            chapter_counter = 0
 
-        for element in document['body']['content']:
-            start_index = element.get('startIndex', 0)
-            end_index = element.get('endIndex', 0)
-            element_content_html = ""
+            for element in main_body_content:
+                # Reuse existing logic for main body content
+                if 'paragraph' in element:
+                    paragraph = element['paragraph']
+                    named_style_type = paragraph.get('paragraphStyle', {}).get('namedStyleType')
+                    text_run_content = extract_text_from_elements([element])
 
-            found_tab_for_element = False
-            if doc_tabs:
-                for i, book_entry in enumerate(parsed_data['books']):
-                    if start_index >= book_entry['startIndex'] and start_index < book_entry['endIndex']:
-                        current_tab_index = i
-                        found_tab_for_element = True
-                        break
-            elif parsed_data['books']:
-                current_tab_index = 0
-                found_tab_for_element = True
-
-            if not found_tab_for_element:
-                continue
-
-            if 'paragraph' in element:
-                paragraph = element['paragraph']
-                named_style_type = paragraph.get('paragraphStyle', {}).get('namedStyleType')
-                text_run_content = extract_text_from_elements([element])
-
-                if named_style_type == 'HEADING_1':
-                    if current_chapter:
-                        parsed_data['books'][current_tab_index]['chapters'].append(current_chapter)
-                    chapter_counter += 1
-                    current_chapter = {
-                        "number": text_run_content.strip(),
-                        "title": "",
-                        "content": "",
-                        "id": f"chapter-{chapter_counter}"
-                    }
-                elif named_style_type == 'SUBTITLE':
-                    if current_chapter and not current_chapter['title']:
-                        current_chapter['title'] = text_run_content.strip()
+                    if named_style_type == 'HEADING_1':
+                        if current_chapter:
+                            single_book_entry['chapters'].append(current_chapter)
+                        chapter_counter += 1
+                        current_chapter = {
+                            "number": text_run_content.strip(),
+                            "title": "",
+                            "content": "",
+                            "id": f"chapter-main-{chapter_counter}"
+                        }
+                    elif named_style_type == 'SUBTITLE':
+                        if current_chapter and not current_chapter['title']:
+                            current_chapter['title'] = text_run_content.strip()
+                        else:
+                             if current_chapter:
+                                current_chapter['content'] += text_run_content
+                             else:
+                                 if not single_book_entry['chapters'] and not current_chapter:
+                                     chapter_counter += 1
+                                     current_chapter = {
+                                         "number": "0", "title": "Introduction", "content": "",
+                                         "id": f"chapter-main-{chapter_counter}"
+                                     }
+                                     single_book_entry['chapters'].append(current_chapter)
+                                 if current_chapter:
+                                     current_chapter['content'] += text_run_content
                     else:
                         if current_chapter:
                             current_chapter['content'] += text_run_content
                         else:
-                            pass
-                else:
-                    if current_chapter:
-                        current_chapter['content'] += text_run_content
-                    else:
-                        if parsed_data['books'][current_tab_index]['chapters']:
-                            parsed_data['books'][current_tab_index]['chapters'][0]['content'] += text_run_content
-                        else:
-                            if not current_chapter:
+                            if not single_book_entry['chapters'] and not current_chapter:
                                 chapter_counter += 1
                                 current_chapter = {
-                                    "number": "0",
-                                    "title": "Introduction",
-                                    "content": "",
-                                    "id": f"chapter-{chapter_counter}"
+                                    "number": "0", "title": "Introduction", "content": "",
+                                    "id": f"chapter-main-{chapter_counter}"
                                 }
-                                parsed_data['books'][current_tab_index]['chapters'].append(current_chapter)
-                            current_chapter['content'] += text_run_content
-            else:
-                element_text = extract_text_from_elements([element])
-                if current_chapter:
-                    current_chapter['content'] += element_text
-                elif parsed_data['books'][current_tab_index]['chapters']:
-                    parsed_data['books'][current_tab_index]['chapters'][0]['content'] += element_text
+                                single_book_entry['chapters'].append(current_chapter)
+                            if current_chapter:
+                                current_chapter['content'] += text_run_content
                 else:
-                    if not current_chapter:
-                        chapter_counter += 1
-                        current_chapter = {
-                            "number": "0",
-                            "title": "Introduction",
-                            "content": "",
-                            "id": f"chapter-{chapter_counter}"
-                        }
-                        parsed_data['books'][current_tab_index]['chapters'].append(current_chapter)
-                    current_chapter['content'] += element_text
+                    element_text = extract_text_from_elements([element])
+                    if current_chapter:
+                        current_chapter['content'] += element_text
+                    else:
+                        if not single_book_entry['chapters'] and not current_chapter:
+                            chapter_counter += 1
+                            current_chapter = {
+                                "number": "0", "title": "Introduction", "content": "",
+                                "id": f"chapter-main-{chapter_counter}"
+                            }
+                            single_book_entry['chapters'].append(current_chapter)
+                        if current_chapter:
+                            current_chapter['content'] += element_text
 
-        if current_chapter and current_tab_index != -1:
-            parsed_data['books'][current_tab_index]['chapters'].append(current_chapter)
+            if current_chapter:
+                single_book_entry['chapters'].append(current_chapter)
 
+            parsed_data['books'].append(single_book_entry)
+        # --- END MODIFIED LOGIC ---
+
+        # Filter out books with no chapters after processing
         parsed_data['books'] = [book for book in parsed_data['books'] if book['chapters']]
 
         return jsonify(parsed_data)
