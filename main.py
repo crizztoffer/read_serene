@@ -49,12 +49,22 @@ def extract_text_from_elements(elements):
 # --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
 def get_document_content():
-    # *** DOCUMENT ID IS NOW DEFINED HERE DIRECTLY IN PYTHON ***
-    # IMPORTANT: Replace '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI' with YOUR ACTUAL Google Doc ID
-    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI'
+    # --- AUTHENTICATION CHECK ---
+    expected_api_key = os.environ.get('RAILWAY_APP_API_KEY')
+    incoming_api_key = request.headers.get('X-API-Key') # Get key from X-API-Key header
 
-    # The check for 'document_id' missing from query parameters is no longer needed
-    # because it's now hardcoded here.
+    if not expected_api_key:
+        app.logger.critical("RAILWAY_APP_API_KEY environment variable is not set in Railway!")
+        return jsonify({"error": "Server configuration error: API key not set."}), 500
+
+    if not incoming_api_key or incoming_api_key != expected_api_key:
+        app.logger.warning(f"Unauthorized access attempt. Incoming key: '{incoming_api_key}'")
+        return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
+    # --- END AUTHENTICATION CHECK ---
+
+    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API AGAIN ***
+    # IMPORTANT: Replace 'YOUR_ACTUAL_GOOGLE_DOC_ID_HERE' with your specific document ID.
+    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI'
 
     try:
         service = get_docs_service()
