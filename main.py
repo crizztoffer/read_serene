@@ -26,7 +26,7 @@ def get_docs_service():
         app.logger.info("Google Docs service initialized successfully.")
         return service
     except Exception as e:
-        app.logger.error(f"Error initializing Google Docs service: {e}", exc_info=True) # exc_info=True prints traceback
+        app.logger.error(f"Error initializing Google Docs service: {e}", exc_info=True)
         raise
 
 # --- Helper function to extract text from Google Docs content ---
@@ -49,10 +49,12 @@ def extract_text_from_elements(elements):
 # --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
 def get_document_content():
-    document_id = request.args.get('document_id')
-    if not document_id:
-        app.logger.error("Missing 'document_id' query parameter.")
-        return jsonify({"error": "Missing 'document_id' query parameter."}), 400
+    # *** DOCUMENT ID IS NOW DEFINED HERE DIRECTLY IN PYTHON ***
+    # IMPORTANT: Replace '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI' with YOUR ACTUAL Google Doc ID
+    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI'
+
+    # The check for 'document_id' missing from query parameters is no longer needed
+    # because it's now hardcoded here.
 
     try:
         service = get_docs_service()
@@ -106,7 +108,7 @@ def get_document_content():
         current_chapter = None
         chapter_counter = 0
 
-        for element in document['body']['content']: # This is the line that's causing the original error
+        for element in document['body']['content']:
             start_index = element.get('startIndex', 0)
             end_index = element.get('endIndex', 0)
             element_content_html = ""
@@ -196,10 +198,10 @@ def get_document_content():
     except ValueError as e:
         app.logger.error(f"Configuration Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    except KeyError as e: # Catch specific KeyError
+    except KeyError as e:
         app.logger.error(f"Data parsing error: Missing expected key {e} in Google Doc response. Check document permissions or structure.", exc_info=True)
         return jsonify({"error": f"Data parsing error: Missing expected key {e} in Google Doc response. Possible permissions issue or empty document."}), 500
-    except Exception as e: # Generic fallback for other unexpected errors
+    except Exception as e:
         app.logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         return jsonify({"error": f"An unexpected server error occurred: {e}"}), 500
 
