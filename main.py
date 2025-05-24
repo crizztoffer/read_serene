@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapici_ient.errors import HttpError
+from googleapiclient.errors import HttpError # <-- Corrected typo here
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -41,7 +41,7 @@ def extract_text_from_elements(elements):
                     text_content += text_run['textRun']['content']
         elif 'table' in element:
             for row in element['table']['tableRows']:
-                for cell in row['tableCells']:
+                for cell in row['table']['tableCells']: # Accessing 'tableCells' key
                     text_content += extract_text_from_elements(cell['content']) + " | "
             text_content += "\n"
     return text_content
@@ -62,8 +62,7 @@ def get_document_content():
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API AGAIN (CORRECTED) ***
-    # This is the corrected ID from the link you provided:
+    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API (CORRECTED ID) ***
     document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI'
 
     try:
