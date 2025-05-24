@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from googleapici_ient.errors import HttpError
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -62,9 +62,9 @@ def get_document_content():
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API AGAIN ***
-    # IMPORTANT: Replace 'YOUR_ACTUAL_GOOGLE_DOC_ID_HERE' with your specific document ID.
-    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCHbmHgYI'
+    # *** DOCUMENT ID IS NOW HARDCODED IN PYTHON API AGAIN (CORRECTED) ***
+    # This is the corrected ID from the link you provided:
+    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI'
 
     try:
         service = get_docs_service()
