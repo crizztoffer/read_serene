@@ -47,7 +47,6 @@ def extract_text_from_elements(elements):
             text_content += "\n"
     return text_content
 
----
 
 # --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
@@ -65,7 +64,7 @@ def get_document_content():
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    # *** DOCUMENT ID IS HARDCODED IN PYTHON API ***
+    # *** DOCUMENT ID IS HARDCODED IN PYTHON API (CORRECTED ID) ***
     document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI' # Confirmed correct ID
 
     try:
