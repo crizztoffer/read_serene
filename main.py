@@ -160,12 +160,7 @@ def get_document_content():
                         else:
                             # If no chapter, add to an 'Introduction' chapter
                             if not book_entry['chapters'] and not current_chapter:
-                                chapter_counter += 1
-                                current_chapter = {
-                                    "number": "0", "title": "Introduction", "content": "",
-                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
-                                }
-                                book_entry['chapters'].append(current_chapter)
+                                continue
                             if current_chapter:
                                 current_chapter['content'] += element_text
 
