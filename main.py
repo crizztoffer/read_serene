@@ -6,6 +6,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from flask_cors import CORS
 
+# NEW IMPORTS FOR TEXT-TO-SPEECH
+from google.cloud import texttospeech
+import base64
+
 app = Flask(__name__)
 CORS(app)
 
@@ -15,6 +19,8 @@ SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 def get_docs_service():
     """Initializes and returns a Google Docs API service client."""
     try:
+        # This checks for GOOGLE_APPLICATION_CREDENTIALS_JSON for both Docs and TTS.
+        # The TextToSpeechClient() in the new endpoint will also implicitly use this.
         creds_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
         if not creds_json:
             app.logger.error("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set.")
@@ -269,6 +275,66 @@ def get_document_content():
     except Exception as e:
         app.logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         return jsonify({"error": f"An unexpected server error occurred: {e}"}), 500
+
+
+# --- NEW: API Endpoint to Synthesize Speech ---
+@app.route('/synthesize-speech', methods=['POST'])
+def synthesize_speech_endpoint():
+    """
+    API endpoint to synthesize speech using Google Cloud Text-to-Speech.
+    Expects JSON payload with 'text', 'voiceName', 'languageCode'.
+    Returns base64 encoded audio content.
+    """
+    # Basic request validation
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    text_content = data.get('text')
+    voice_name = data.get('voiceName')
+    language_code = data.get('languageCode')
+    # Optional: You might also pass gender, pitch, speaking rate if needed
+    # ssml_gender = data.get('gender', 'NEUTRAL') # 'MALE', 'FEMALE', 'NEUTRAL'
+
+    if not all([text_content, voice_name, language_code]):
+        return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
+
+    try:
+        # The TextToSpeechClient will automatically pick up credentials from
+        # the GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable set on Railway.
+        client = texttospeech.TextToSpeechClient()
+
+        synthesis_input = texttospeech.SynthesisInput(text=text_content)
+
+        # Select the voice parameters.
+        voice_params = texttospeech.VoiceSelectionParams(
+            language_code=language_code,
+            name=voice_name,
+            # ssml_gender=texttospeech.SsmlVoiceGender.from_str(ssml_gender) # Uncomment if using gender
+        )
+
+        # Select the type of audio file to be returned (MP3 is good for web).
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+
+        # Perform the text-to-speech request.
+        response = client.synthesize_speech(
+            input=synthesis_input, voice=voice_params, audio_config=audio_config
+        )
+
+        # The audio content is binary data. Base64 encode it for JSON transfer.
+        audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
+
+        return jsonify({
+            "success": True,
+            "audioContent": audio_base64,
+            "format": "audio/mpeg" # MIME type for MP3
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
