@@ -81,6 +81,7 @@ def get_document_content():
 
         parsed_data = {
             "title": document.get('title', 'Untitled Document'),
+            "document_id": document_id,  # <-- ADDED THIS LINE
             "books": []
         }
 
@@ -205,18 +206,18 @@ def get_document_content():
                         if current_chapter and not current_chapter['title']:
                             current_chapter['title'] = text_run_content.strip()
                         else:
-                             if current_chapter:
+                            if current_chapter:
                                 current_chapter['content'] += text_run_content
-                             else:
-                                 if not single_book_entry['chapters'] and not current_chapter:
-                                     chapter_counter += 1
-                                     current_chapter = {
-                                         "number": "0", "title": "Introduction", "content": "",
-                                         "id": f"chapter-main-{chapter_counter}"
-                                     }
-                                     single_book_entry['chapters'].append(current_chapter)
-                                 if current_chapter:
-                                     current_chapter['content'] += text_run_content
+                            else:
+                                if not single_book_entry['chapters'] and not current_chapter:
+                                    chapter_counter += 1
+                                    current_chapter = {
+                                        "number": "0", "title": "Introduction", "content": "",
+                                        "id": f"chapter-main-{chapter_counter}"
+                                    }
+                                    single_book_entry['chapters'].append(current_chapter)
+                                if current_chapter:
+                                    current_chapter['content'] += text_run_content
                     else:
                         if current_chapter:
                             current_chapter['content'] += text_run_content
