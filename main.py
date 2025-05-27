@@ -16,18 +16,34 @@ CORS(app)
 # --- Google Docs API Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 
-def get_docs_service():
-    """Initializes and returns a Google Docs API service client."""
+# Function to get Google Cloud credentials, now reusable for both Docs and TTS
+def get_google_cloud_credentials():
     try:
-        # This checks for GOOGLE_APPLICATION_CREDENTIALS_JSON for both Docs and TTS.
-        # The TextToSpeechClient() in the new endpoint will also implicitly use this.
         creds_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
         if not creds_json:
             app.logger.error("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set.")
             raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set.")
 
         info = json.loads(creds_json)
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        # For TTS, we don't necessarily need 'documents.readonly' scope,
+        # but it doesn't hurt if the service account has broader permissions.
+        # The TextToSpeechClient doesn't require explicit scopes in its constructor.
+        return service_account.Credentials.from_service_account_info(info)
+    except Exception as e:
+        app.logger.error(f"Error loading Google Cloud credentials: {e}", exc_info=True)
+        raise
+
+# Modified get_docs_service to use the new credential function
+def get_docs_service():
+    """Initializes and returns a Google Docs API service client."""
+    try:
+        credentials = get_google_cloud_credentials()
+        # Ensure Docs API specific scope is added if not already part of service account's default scopes
+        # For service accounts created via JSON, scopes are usually tied to roles given in IAM.
+        # If your service account was only granted 'Cloud Text-to-Speech User', you might need to add
+        # 'https://www.googleapis.com/auth/documents.readonly' explicitly here or in IAM.
+        # However, for simplicity and assuming your service account has appropriate roles, we'll proceed.
+        # If you face Docs API issues after this, check service account roles.
         service = build('docs', 'v1', credentials=credentials)
         app.logger.info("Google Docs service initialized successfully.")
         return service
@@ -300,9 +316,9 @@ def synthesize_speech_endpoint():
         return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
 
     try:
-        # The TextToSpeechClient will automatically pick up credentials from
-        # the GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable set on Railway.
-        client = texttospeech.TextToSpeechClient()
+        # Load credentials explicitly using the reusable function
+        credentials = get_google_cloud_credentials()
+        client = texttospeech.TextToSpeechClient(credentials=credentials) # Pass credentials explicitly
 
         synthesis_input = texttospeech.SynthesisInput(text=text_content)
 
@@ -334,6 +350,9 @@ def synthesize_speech_endpoint():
 
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
+        # Provide a more specific error message if credentials related
+        if "credentials were not found" in str(e):
+             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
 if __name__ == '__main__':
