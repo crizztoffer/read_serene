@@ -14,7 +14,10 @@ app = Flask(__name__)
 CORS(app)
 
 # --- Google Docs API Configuration ---
+# Only 'documents.readonly' is sufficient if you're reconstructing HTML from JSON.
+# 'drive.readonly' is NOT needed if we are not using drive.files().export
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
+
 
 # Function to get Google Cloud credentials, now reusable for both Docs and TTS
 def get_google_cloud_credentials():
@@ -25,9 +28,6 @@ def get_google_cloud_credentials():
             raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set.")
 
         info = json.loads(creds_json)
-        # For TTS, we don't necessarily need 'documents.readonly' scope,
-        # but it doesn't hurt if the service account has broader permissions.
-        # The TextToSpeechClient doesn't require explicit scopes in its constructor.
         return service_account.Credentials.from_service_account_info(info)
     except Exception as e:
         app.logger.error(f"Error loading Google Cloud credentials: {e}", exc_info=True)
@@ -38,12 +38,6 @@ def get_docs_service():
     """Initializes and returns a Google Docs API service client."""
     try:
         credentials = get_google_cloud_credentials()
-        # Ensure Docs API specific scope is added if not already part of service account's default scopes
-        # For service accounts created via JSON, scopes are usually tied to roles given in IAM.
-        # If your service account was only granted 'Cloud Text-to-Speech User', you might need to add
-        # 'https://www.googleapis.com/auth/documents.readonly' explicitly here or in IAM.
-        # However, for simplicity and assuming your service account has appropriate roles, we'll proceed.
-        # If you face Docs API issues after this, check service account roles.
         service = build('docs', 'v1', credentials=credentials)
         app.logger.info("Google Docs service initialized successfully.")
         return service
@@ -51,23 +45,59 @@ def get_docs_service():
         app.logger.error(f"Error initializing Google Docs service: {e}", exc_info=True)
         raise
 
-# --- Helper function to extract text from Google Docs content ---
-def extract_text_from_elements(elements):
-    text_content = ""
+# --- REVISED: Helper function to extract text *with formatting* from Google Docs content ---
+# This function will traverse the Docs API JSON structure and reconstruct basic HTML.
+def extract_formatted_html_from_elements(elements):
+    html_content = ""
     if not elements:
-        return text_content
+        return html_content
+
     for element in elements:
         if 'paragraph' in element:
+            paragraph_html_parts = []
             for text_run in element['paragraph']['elements']:
                 if 'textRun' in text_run:
-                    text_content += text_run['textRun']['content']
+                    content = text_run['textRun']['content']
+                    text_style = text_run['textRun'].get('textStyle', {})
+
+                    # Apply formatting based on textStyle properties
+                    # It's good practice to use strong/em for semantic meaning over b/i
+                    if text_style.get('bold'):
+                        content = f"<strong>{content}</strong>"
+                    if text_style.get('italic'):
+                        content = f"<em>{content}</em>"
+                    if text_style.get('underline'):
+                        content = f"<u>{content}</u>"
+                    # Add more styles if needed (e.g., strikethrough, foregroundColor)
+
+                    paragraph_html_parts.append(content)
+            
+            # Join text runs for this paragraph
+            full_paragraph_content = "".join(paragraph_html_parts)
+
+            # Check for empty paragraphs or those that only contain newlines
+            # Docs API often includes trailing newlines in 'content' of textRuns
+            # If the content is just a newline, treat it as a <br>
+            if full_paragraph_content.strip() == "\n":
+                html_content += "<br>"
+            elif full_paragraph_content.strip() == "":
+                html_content += "" # Or "<p></p>" if you want empty paragraphs
+            else:
+                html_content += f"<p>{full_paragraph_content.strip()}</p>" # Wrap in p-tag and strip extra leading/trailing newlines
         elif 'table' in element:
-            # Recursively extract content from table cells
+            table_html = "<table>"
             for row in element['table']['tableRows']:
+                table_html += "<tr>"
                 for cell in row['tableCells']:
-                    text_content += extract_text_from_elements(cell['content']) + " | "
-            text_content += "\n"
-    return text_content
+                    table_html += f"<td>{extract_formatted_html_from_elements(cell['content'])}</td>"
+                table_html += "</tr>"
+            table_html += "</table>"
+            html_content += table_html + "\n" # Add newline after table for separation
+        elif 'sectionBreak' in element or 'pageBreak' in element:
+            html_content += "<br><hr><br>" # Or some other visual separator
+        # Add other element types as needed (e.g., list, embeddedObject)
+        # For simplicity, this example primarily focuses on paragraphs and tables.
+    return html_content
 
 
 # --- API Endpoint to Fetch Document Content ---
@@ -75,7 +105,7 @@ def extract_text_from_elements(elements):
 def get_document_content():
     # --- AUTHENTICATION CHECK ---
     expected_api_key = os.environ.get('RAILWAY_APP_API_KEY')
-    incoming_api_key = request.headers.get('X-API-Key') # Get key from X-API-Key header
+    incoming_api_key = request.headers.get('X-API-Key')
 
     if not expected_api_key:
         app.logger.critical("RAILWAY_APP_API_KEY environment variable is not set in Railway!")
@@ -86,87 +116,77 @@ def get_document_content():
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    # *** DOCUMENT ID IS HARDCODED IN PYTHON API (CORRECTED ID) ***
     document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI' # Confirmed correct ID
 
     try:
         service = get_docs_service()
-        app.logger.info(f"Fetching document with ID: {document_id}")
-        # Make sure includeTabsContent=True is still there
+        app.logger.info(f"Fetching document structure with ID: {document_id}")
+        # Fetch the document structure including tab content
         document = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
-        # --- DEBUGGING LOGS ---
-        app.logger.info(f"Document fetched. Top-level keys: {list(document.keys())}")
-        # Only log first 1000 characters to prevent overwhelming logs
-        app.logger.info(f"Full document response (first 1000 chars): {json.dumps(document, indent=2)[:1000]}...")
-        # --- END DEBUGGING LOGS ---
+        app.logger.info(f"Document structure fetched. Top-level keys: {list(document.keys())}")
 
         parsed_data = {
             "title": document.get('title', 'Untitled Document'),
-            "document_id": document_id,  # <-- ADDED THIS LINE
+            "document_id": document_id,
             "books": []
         }
 
-        # --- MODIFIED LOGIC FOR HANDLING TABS ---
+        # --- MODIFIED LOGIC FOR HANDLING TABS AND EXTRACTING FORMATTED HTML ---
         if 'tabs' in document and document['tabs']:
             for i, tab_data in enumerate(document['tabs']):
                 tab_properties = tab_data.get('tabProperties', {})
                 document_tab = tab_data.get('documentTab', {})
                 tab_body = document_tab.get('body', {})
-                tab_content = tab_body.get('content', [])
+                tab_content_elements = tab_body.get('content', []) # These are the raw JSON elements
 
                 book_entry = {
                     "title": tab_properties.get('title', f"Tab {i+1}"),
-                    "id": f"tab-{tab_properties.get('tabId', f'tab_{i+1}').replace('.', '_')}", # Use tabId or generate
-                    "startIndex": tab_properties.get('range', {}).get('startIndex', 0),
-                    "endIndex": tab_properties.get('range', {}).get('endIndex', 0),
+                    "id": f"tab-{tab_properties.get('tabId', f'tab_{i+1}').replace('.', '_')}",
                     "chapters": []
                 }
 
                 current_chapter = None
                 chapter_counter = 0
 
-                for element in tab_content: # Iterate through content of the current tab
-                    start_index = element.get('startIndex', 0)
-                    end_index = element.get('endIndex', 0)
-
+                # Process elements within the current tab to build chapters
+                for element in tab_content_elements:
+                    named_style_type = None
                     if 'paragraph' in element:
-                        paragraph = element['paragraph']
-                        named_style_type = paragraph.get('paragraphStyle', {}).get('namedStyleType')
-                        text_run_content = extract_text_from_elements([element])
+                        named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
 
-                        if named_style_type == 'HEADING_1':
-                            if current_chapter:
-                                book_entry['chapters'].append(current_chapter)
-                            chapter_counter += 1
-                            current_chapter = {
-                                "number": text_run_content.strip(),
-                                "title": "",
-                                "content": "",
-                                "id": f"chapter-{book_entry['id']}-{chapter_counter}" # Unique ID per chapter within book
-                            }
-                        elif named_style_type == 'SUBTITLE':
-                            if current_chapter and not current_chapter['title']:
-                                current_chapter['title'] = text_run_content.strip()
-                            else:
-                                if current_chapter:
-                                    current_chapter['content'] += text_run_content
-                                else:
-                                    # If subtitle without preceding H1, treat as part of an intro chapter
-                                    if not book_entry['chapters'] and not current_chapter:
-                                        chapter_counter += 1
-                                        current_chapter = {
-                                            "number": "0", "title": "Introduction", "content": "",
-                                            "id": f"chapter-{book_entry['id']}-{chapter_counter}"
-                                        }
-                                        book_entry['chapters'].append(current_chapter)
-                                    if current_chapter: # Ensure current_chapter is set
-                                        current_chapter['content'] += text_run_content
+                    # Extract formatted HTML for the current element
+                    element_html_content = extract_formatted_html_from_elements([element]) # Pass as list because extract_formatted_html_from_elements expects iterable
+
+                    if named_style_type == 'HEADING_1':
+                        if current_chapter:
+                            book_entry['chapters'].append(current_chapter)
+                        chapter_counter += 1
+                        # Heading number/title usually shouldn't contain HTML tags from b/i/u, strip them if present
+                        chapter_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
+                        # Use a simple regex to strip other HTML tags for number/title if they occur
+                        import re
+                        chapter_text_content = re.sub(r'<[^>]*>', '', chapter_text_content)
+
+                        current_chapter = {
+                            "number": chapter_text_content,
+                            "title": "",
+                            "content": "",
+                            "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                        }
+                    elif named_style_type == 'SUBTITLE':
+                        # Subtitle content should also be stripped of HTML tags for display as 'title'
+                        subtitle_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
+                        import re
+                        subtitle_text_content = re.sub(r'<[^>]*>', '', subtitle_text_content)
+
+                        if current_chapter and not current_chapter['title']:
+                            current_chapter['title'] = subtitle_text_content
                         else:
+                            # If a subtitle appears without a preceding HEADING_1, treat it as general content
                             if current_chapter:
-                                current_chapter['content'] += text_run_content
-                            else:
-                                # If general text without a heading, add to an 'Introduction' chapter if none exists
+                                current_chapter['content'] += element_html_content
+                            else: # Introduction chapter case
                                 if not book_entry['chapters'] and not current_chapter:
                                     chapter_counter += 1
                                     current_chapter = {
@@ -174,75 +194,69 @@ def get_document_content():
                                         "id": f"chapter-{book_entry['id']}-{chapter_counter}"
                                     }
                                     book_entry['chapters'].append(current_chapter)
-                                if current_chapter: # Ensure current_chapter is set
-                                    current_chapter['content'] += text_run_content
-                    else: # Handle non-paragraph elements like tables directly
-                        element_text = extract_text_from_elements([element])
+                                if current_chapter:
+                                    current_chapter['content'] += element_html_content
+                    else: # General body text or other elements
                         if current_chapter:
-                            current_chapter['content'] += element_text
-                        else:
-                            # If no chapter, add to an 'Introduction' chapter
+                            current_chapter['content'] += element_html_content
+                        else: # Introduction chapter case
                             if not book_entry['chapters'] and not current_chapter:
-                                continue
+                                chapter_counter += 1
+                                current_chapter = {
+                                    "number": "0", "title": "Introduction", "content": "",
+                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                }
+                                book_entry['chapters'].append(current_chapter)
                             if current_chapter:
-                                current_chapter['content'] += element_text
+                                current_chapter['content'] += element_html_content
 
-                if current_chapter:
+                if current_chapter: # Append the last chapter if it exists
                     book_entry['chapters'].append(current_chapter)
 
                 parsed_data['books'].append(book_entry)
         else:
-            # Fallback for documents without explicit 'tabs' (or if includeTabsContent is False)
+            # Fallback for documents without explicit 'tabs'
             app.logger.warning("No 'tabs' found in document response. Assuming single main body.")
-            main_body_content = document.get('body', {}).get('content', [])
+            main_body_content_elements = document.get('body', {}).get('content', [])
             
             single_book_entry = {
                 "title": document.get('title', 'Main Document'),
                 "id": "tab-main",
-                "startIndex": 0,
-                "endIndex": len(json.dumps(document)), # Placeholder, actual end index of doc body
                 "chapters": []
             }
 
             current_chapter = None
             chapter_counter = 0
 
-            for element in main_body_content:
-                # Reuse existing logic for main body content
+            for element in main_body_content_elements:
+                named_style_type = None
                 if 'paragraph' in element:
-                    paragraph = element['paragraph']
-                    named_style_type = paragraph.get('paragraphStyle', {}).get('namedStyleType')
-                    text_run_content = extract_text_from_elements([element])
+                    named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
+                
+                element_html_content = extract_formatted_html_from_elements([element])
 
-                    if named_style_type == 'HEADING_1':
-                        if current_chapter:
-                            single_book_entry['chapters'].append(current_chapter)
-                        chapter_counter += 1
-                        current_chapter = {
-                            "number": text_run_content.strip(),
-                            "title": "",
-                            "content": "",
-                            "id": f"chapter-main-{chapter_counter}"
-                        }
-                    elif named_style_type == 'SUBTITLE':
-                        if current_chapter and not current_chapter['title']:
-                            current_chapter['title'] = text_run_content.strip()
-                        else:
-                            if current_chapter:
-                                current_chapter['content'] += text_run_content
-                            else:
-                                if not single_book_entry['chapters'] and not current_chapter:
-                                    chapter_counter += 1
-                                    current_chapter = {
-                                        "number": "0", "title": "Introduction", "content": "",
-                                        "id": f"chapter-main-{chapter_counter}"
-                                    }
-                                    single_book_entry['chapters'].append(current_chapter)
-                                if current_chapter:
-                                    current_chapter['content'] += text_run_content
+                if named_style_type == 'HEADING_1':
+                    if current_chapter:
+                        single_book_entry['chapters'].append(current_chapter)
+                    chapter_counter += 1
+                    chapter_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
+                    import re
+                    chapter_text_content = re.sub(r'<[^>]*>', '', chapter_text_content)
+                    current_chapter = {
+                        "number": chapter_text_content,
+                        "title": "",
+                        "content": "",
+                        "id": f"chapter-main-{chapter_counter}"
+                    }
+                elif named_style_type == 'SUBTITLE':
+                    subtitle_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
+                    import re
+                    subtitle_text_content = re.sub(r'<[^>]*>', '', subtitle_text_content)
+                    if current_chapter and not current_chapter['title']:
+                        current_chapter['title'] = subtitle_text_content
                     else:
                         if current_chapter:
-                            current_chapter['content'] += text_run_content
+                            current_chapter['content'] += element_html_content
                         else:
                             if not single_book_entry['chapters'] and not current_chapter:
                                 chapter_counter += 1
@@ -252,11 +266,10 @@ def get_document_content():
                                 }
                                 single_book_entry['chapters'].append(current_chapter)
                             if current_chapter:
-                                current_chapter['content'] += text_run_content
+                                current_chapter['content'] += element_html_content
                 else:
-                    element_text = extract_text_from_elements([element])
                     if current_chapter:
-                        current_chapter['content'] += element_text
+                        current_chapter['content'] += element_html_content
                     else:
                         if not single_book_entry['chapters'] and not current_chapter:
                             chapter_counter += 1
@@ -266,13 +279,12 @@ def get_document_content():
                             }
                             single_book_entry['chapters'].append(current_chapter)
                         if current_chapter:
-                            current_chapter['content'] += element_text
+                            current_chapter['content'] += element_html_content
 
-            if current_chapter:
+            if current_chapter: # Append the last chapter if it exists
                 single_book_entry['chapters'].append(current_chapter)
 
             parsed_data['books'].append(single_book_entry)
-        # --- END MODIFIED LOGIC ---
 
         # Filter out books with no chapters after processing
         parsed_data['books'] = [book for book in parsed_data['books'] if book['chapters']]
@@ -309,48 +321,48 @@ def synthesize_speech_endpoint():
     text_content = data.get('text')
     voice_name = data.get('voiceName')
     language_code = data.get('languageCode')
-    # Optional: You might also pass gender, pitch, speaking rate if needed
-    # ssml_gender = data.get('gender', 'NEUTRAL') # 'MALE', 'FEMALE', 'NEUTRAL'
 
     if not all([text_content, voice_name, language_code]):
         return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
 
     try:
-        # Load credentials explicitly using the reusable function
         credentials = get_google_cloud_credentials()
-        client = texttospeech.TextToSpeechClient(credentials=credentials) # Pass credentials explicitly
+        client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        synthesis_input = texttospeech.SynthesisInput(text=text_content)
+        # IMPORTANT: If your text_content now contains HTML tags (like <strong>),
+        # the Text-to-Speech API needs to interpret them as SSML.
+        # So, you MUST use `ssml_text` instead of `text`.
+        # This means the frontend should send content with proper SSML tags
+        # OR you convert basic HTML to SSML here.
+        # For b/i/u, basic HTML like <strong> is often fine if passed as 'text',
+        # but for full SSML power, use `ssml_text`.
+        # For now, let's stick to 'text' as it often handles basic HTML for speech synthesis.
+        # If TTS output sounds strange with formatting, consider converting to SSML here.
+        synthesis_input = texttospeech.SynthesisInput(text=text_content) # Keep as text for simplicity now
 
-        # Select the voice parameters.
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
             name=voice_name,
-            # ssml_gender=texttospeech.SsmlVoiceGender.from_str(ssml_gender) # Uncomment if using gender
         )
 
-        # Select the type of audio file to be returned (MP3 is good for web).
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3
         )
 
-        # Perform the text-to-speech request.
         response = client.synthesize_speech(
             input=synthesis_input, voice=voice_params, audio_config=audio_config
         )
 
-        # The audio content is binary data. Base64 encode it for JSON transfer.
         audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
 
         return jsonify({
             "success": True,
             "audioContent": audio_base64,
-            "format": "audio/mpeg" # MIME type for MP3
+            "format": "audio/mpeg"
         })
 
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
-        # Provide a more specific error message if credentials related
         if "credentials were not found" in str(e):
              return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
