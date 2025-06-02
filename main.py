@@ -55,14 +55,11 @@ def extract_formatted_html_from_elements(elements):
                     content = text_run['textRun']['content']
                     text_style = text_run['textRun'].get('textStyle', {})
 
-                    # 1. Handle Shift+Enter (soft line breaks) by replacing \n with <br>
-                    # Ensure it only replaces actual newlines, not those that imply paragraph end
-                    # The Google Docs API usually gives a trailing \n for a paragraph textRun.
-                    # We want to convert \n *within* the text.
-                    # The .strip() at the end when creating the <p> tag will handle trailing \n.
+                    # Handle Shift+Enter (soft line breaks) by replacing \n with <br>
+                    # This replaces all newlines within the textRun content with <br> tags.
                     processed_content = content.replace('\n', '<br>')
                     
-                    # 2. Apply formatting based on textStyle properties
+                    # Apply formatting based on textStyle properties
                     if text_style.get('bold'):
                         processed_content = f"<strong>{processed_content}</strong>"
                     if text_style.get('italic'):
@@ -72,7 +69,7 @@ def extract_formatted_html_from_elements(elements):
                     
                     paragraph_html_parts.append(processed_content)
                 
-                # 3. Handle Horizontal Rules (explicit check for horizontalRule element)
+                # Handle Horizontal Rules (explicit check for horizontalRule element)
                 elif 'horizontalRule' in text_run:
                     paragraph_html_parts.append("<hr>")
 
@@ -99,12 +96,15 @@ def extract_formatted_html_from_elements(elements):
             else:
                 # If there's actual content, wrap in <p> and ensure no redundant trailing <br>
                 # Remove a trailing <br> if it exists, as the <p> naturally provides a block break.
+                # This ensures that a paragraph ending with an implicit newline from Google Docs
+                # doesn't get an extra <br> at the end.
                 if full_paragraph_content.endswith('<br>'):
-                    # Remove the last <br> only if it's not the only content
-                    if full_paragraph_content.count('<br>') == (len(full_paragraph_content.replace('<br>', '')) == 0): # Check if only <br>s
-                        html_content += f"<p>{full_paragraph_content}</p>" # Preserve if it's just <br>s
-                    else:
-                        html_content += f"<p>{full_paragraph_content[:-4].strip()}</p>" # Remove last <br> for regular content
+                    # Only remove if the paragraph actually contains non-<br> content or multiple <br>s
+                    # If it's just `<br>`, it's probably intended as a blank line
+                    if len(temp_stripped_content) > 0 or full_paragraph_content.count('<br>') > 1:
+                        html_content += f"<p>{full_paragraph_content.rstrip('<br>').strip()}</p>"
+                    else: # It was just a single <br> representing a blank line
+                        html_content += f"<p>{full_paragraph_content.strip()}</p>" # Keep the <br>
                 else:
                     html_content += f"<p>{full_paragraph_content.strip()}</p>"
         
@@ -119,13 +119,15 @@ def extract_formatted_html_from_elements(elements):
             table_html += "</table>"
             html_content += table_html + "\n"
         
-        # If you still want to represent section breaks visually, uncomment and adjust:
+        # Removed section/page break handling for HR, as it's now handled by explicit horizontalRule element.
+        # If you still want a visual separator for section/page breaks, define a different one here.
+        # For example:
         # elif 'sectionBreak' in element or 'pageBreak' in element:
-        #     html_content += "<div class='section-break-indicator'></div>" # Or <hr> if it makes sense contextually
+        #     html_content += "<div class='docs-page-break'></div>" 
 
     return html_content
 
-# --- API Endpoint to Fetch Document Content (remains largely same, uses updated helper) ---
+# --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
 def get_document_content():
     # --- AUTHENTICATION CHECK ---
@@ -146,12 +148,9 @@ def get_document_content():
     try:
         service = get_docs_service()
         app.logger.info(f"Fetching document structure with ID: {document_id}")
-        # Fetch the document structure including tab content
-        # Note: 'includeTabsContent' might not be standard Docs API param. 
-        # If it causes an error, remove it. Docs API typically structures content in 'body'.
-        # If "tabs" are a custom interpretation by another service, that service's API would define it.
-        # Assuming your previous usage of 'tabs' key was working with some custom API or recent undocumented Docs API feature.
-        document = service.documents().get(documentId=document_id).execute() # Removed includeTabsContent for standard API
+        
+        # REINSTATED: includeTabsContent=True to get the tab structure
+        document = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
         app.logger.info(f"Document structure fetched. Top-level keys: {list(document.keys())}")
 
@@ -161,74 +160,151 @@ def get_document_content():
             "books": []
         }
 
-        # --- MODIFIED LOGIC FOR HANDLING TABS AND EXTRACTING FORMATTED HTML ---
-        # Reverting to typical Docs API structure; 'tabs' is not a standard top-level key.
-        # Assuming chapters are determined by HEADING_1 styles within the main body.
-        
-        main_body_content_elements = document.get('body', {}).get('content', [])
-            
-        book_entry = {
-            "title": document.get('title', 'Main Document'),
-            "id": "book-main", # Changed from tab-main for clarity
-            "chapters": []
-        }
+        # --- REVERTED LOGIC FOR HANDLING TABS AND EXTRACTING FORMATTED HTML ---
+        # This section is crucial for your frontend's "books" (tabs) and "chapters" structure.
+        if 'tabs' in document and document['tabs']:
+            for i, tab_data in enumerate(document['tabs']):
+                tab_properties = tab_data.get('tabProperties', {})
+                document_tab = tab_data.get('documentTab', {})
+                tab_body = document_tab.get('body', {})
+                tab_content_elements = tab_body.get('content', []) # These are the raw JSON elements
 
-        current_chapter = None
-        chapter_counter = 0
-
-        for element in main_body_content_elements:
-            named_style_type = None
-            if 'paragraph' in element:
-                named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
-                
-            element_html_content = extract_formatted_html_from_elements([element])
-
-            if named_style_type == 'HEADING_1':
-                if current_chapter:
-                    book_entry['chapters'].append(current_chapter)
-                chapter_counter += 1
-                chapter_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
-                current_chapter = {
-                    "number": chapter_text_content, # Number is the text of the H1
-                    "title": "", # Title will be filled by SUBTITLE if present
-                    "content": "",
-                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                book_entry = {
+                    "title": tab_properties.get('title', f"Tab {i+1}"),
+                    "id": f"tab-{tab_properties.get('tabId', f'tab_{i+1}').replace('.', '_')}",
+                    "chapters": []
                 }
-            elif named_style_type == 'SUBTITLE':
-                subtitle_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
-                if current_chapter and not current_chapter['title']: # If current chapter has no title yet
-                    current_chapter['title'] = subtitle_text_content
-                else: # If subtitle appears without a preceding HEADING_1, or after one with a title, treat as content
+
+                current_chapter = None
+                chapter_counter = 0
+
+                # Process elements within the current tab to build chapters
+                for element in tab_content_elements:
+                    named_style_type = None
+                    if 'paragraph' in element:
+                        named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
+
+                    # Extract formatted HTML for the current element
+                    element_html_content = extract_formatted_html_from_elements([element]) # Pass as list because extract_formatted_html_from_elements expects iterable
+
+                    if named_style_type == 'HEADING_1':
+                        if current_chapter:
+                            book_entry['chapters'].append(current_chapter)
+                        chapter_counter += 1
+                        # Heading number/title usually shouldn't contain HTML tags from b/i/u, strip them if present
+                        chapter_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
+
+                        current_chapter = {
+                            "number": chapter_text_content,
+                            "title": "",
+                            "content": "",
+                            "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                        }
+                    elif named_style_type == 'SUBTITLE':
+                        # Subtitle content should also be stripped of HTML tags for display as 'title'
+                        subtitle_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
+
+                        if current_chapter and not current_chapter['title']:
+                            current_chapter['title'] = subtitle_text_content
+                        else:
+                            # If a subtitle appears without a preceding HEADING_1, treat it as general content
+                            if current_chapter:
+                                current_chapter['content'] += element_html_content
+                            else: # Introduction chapter case
+                                if not book_entry['chapters'] and not current_chapter:
+                                    chapter_counter += 1
+                                    current_chapter = {
+                                        "number": "0", "title": "Introduction", "content": "",
+                                        "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                    }
+                                    book_entry['chapters'].append(current_chapter)
+                                if current_chapter:
+                                    current_chapter['content'] += element_html_content
+                    else: # General body text or other elements
+                        if current_chapter:
+                            current_chapter['content'] += element_html_content
+                        else: # Introduction chapter case
+                            if not book_entry['chapters'] and not current_chapter:
+                                chapter_counter += 1
+                                current_chapter = {
+                                    "number": "0", "title": "Introduction", "content": "",
+                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                }
+                                book_entry['chapters'].append(current_chapter)
+                            if current_chapter:
+                                current_chapter['content'] += element_html_content
+
+                if current_chapter: # Append the last chapter if it exists
+                    book_entry['chapters'].append(current_chapter)
+
+                parsed_data['books'].append(book_entry)
+        else:
+            # Fallback for documents without explicit 'tabs'
+            app.logger.warning("No 'tabs' found in document response. Assuming single main body.")
+            main_body_content_elements = document.get('body', {}).get('content', [])
+            
+            single_book_entry = {
+                "title": document.get('title', 'Main Document'),
+                "id": "book-main", # Changed from tab-main for clarity
+                "chapters": []
+            }
+
+            current_chapter = None
+            chapter_counter = 0
+
+            for element in main_body_content_elements:
+                named_style_type = None
+                if 'paragraph' in element:
+                    named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
+                    
+                element_html_content = extract_formatted_html_from_elements([element])
+
+                if named_style_type == 'HEADING_1':
+                    if current_chapter:
+                        single_book_entry['chapters'].append(current_chapter)
+                    chapter_counter += 1
+                    chapter_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
+                    current_chapter = {
+                        "number": chapter_text_content,
+                        "title": "",
+                        "content": "",
+                        "id": f"chapter-main-{chapter_counter}"
+                    }
+                elif named_style_type == 'SUBTITLE':
+                    subtitle_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
+                    if current_chapter and not current_chapter['title']:
+                        current_chapter['title'] = subtitle_text_content
+                    else:
+                        if current_chapter:
+                            current_chapter['content'] += element_html_content
+                        else:
+                            if not single_book_entry['chapters'] and not current_chapter:
+                                chapter_counter += 1
+                                current_chapter = {
+                                    "number": "0", "title": "Introduction", "content": "",
+                                    "id": f"chapter-main-{chapter_counter}"
+                                }
+                                single_book_entry['chapters'].append(current_chapter)
+                            if current_chapter:
+                                current_chapter['content'] += element_html_content
+                else:
                     if current_chapter:
                         current_chapter['content'] += element_html_content
-                    else: # Case for beginning of document, before any H1, treat as 'Introduction'
-                        if not book_entry['chapters'] and not current_chapter:
+                    else:
+                        if not single_book_entry['chapters'] and not current_chapter:
                             chapter_counter += 1
                             current_chapter = {
                                 "number": "0", "title": "Introduction", "content": "",
-                                "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                "id": f"chapter-main-{chapter_counter}"
                             }
-                            book_entry['chapters'].append(current_chapter)
+                            single_book_entry['chapters'].append(current_chapter)
                         if current_chapter:
                             current_chapter['content'] += element_html_content
-            else: # General body text or other elements
-                if current_chapter:
-                    current_chapter['content'] += element_html_content
-                else: # Case for beginning of document, before any H1 or Subtitle
-                    if not book_entry['chapters'] and not current_chapter:
-                        chapter_counter += 1
-                        current_chapter = {
-                            "number": "0", "title": "Introduction", "content": "",
-                            "id": f"chapter-{book_entry['id']}-{chapter_counter}"
-                        }
-                        book_entry['chapters'].append(current_chapter)
-                    if current_chapter:
-                        current_chapter['content'] += element_html_content
 
-        if current_chapter: # Append the last chapter if it exists
-            book_entry['chapters'].append(current_chapter)
+            if current_chapter: # Append the last chapter if it exists
+                single_book_entry['chapters'].append(current_chapter)
 
-        parsed_data['books'].append(book_entry)
+            parsed_data['books'].append(single_book_entry)
 
         # Filter out books with no chapters after processing
         parsed_data['books'] = [book for book in parsed_data['books'] if book['chapters']]
@@ -247,6 +323,7 @@ def get_document_content():
     except Exception as e:
         app.logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         return jsonify({"error": f"An unexpected server error occurred: {e}"}), 500
+
 
 # --- NEW: API Endpoint to Synthesize Speech ---
 @app.route('/synthesize-speech', methods=['POST'])
