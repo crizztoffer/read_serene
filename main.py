@@ -3,9 +3,9 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapapi.errors import HttpError
+from googleapiclient.errors import HttpError
 from flask_cors import CORS
-import re # Import for regular expressions
+import re
 
 # NEW IMPORTS FOR TEXT-TO-SPEECH
 from google.cloud import texttospeech
@@ -15,12 +15,8 @@ app = Flask(__name__)
 CORS(app)
 
 # --- Google Docs API Configuration ---
-# Only 'documents.readonly' is sufficient if you're reconstructing HTML from JSON.
-# 'drive.readonly' is NOT needed if we are not using drive.files().export
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 
-
-# Function to get Google Cloud credentials, now reusable for both Docs and TTS
 def get_google_cloud_credentials():
     try:
         creds_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
@@ -34,7 +30,6 @@ def get_google_cloud_credentials():
         app.logger.error(f"Error loading Google Cloud credentials: {e}", exc_info=True)
         raise
 
-# Modified get_docs_service to use the new credential function
 def get_docs_service():
     """Initializes and returns a Google Docs API service client."""
     try:
@@ -46,8 +41,6 @@ def get_docs_service():
         app.logger.error(f"Error initializing Google Docs service: {e}", exc_info=True)
         raise
 
-# --- REVISED: Helper function to extract text *with formatting* from Google Docs content ---
-# This function will traverse the Docs API JSON structure and reconstruct basic HTML.
 def extract_formatted_html_from_elements(elements):
     html_content = ""
     if not elements:
@@ -63,12 +56,11 @@ def extract_formatted_html_from_elements(elements):
 
                     # --- CRITICAL FIX FOR SHIFT+ENTER ---
                     # Replace common non-standard line break characters with <br>
-                    # U+000B (Line Tabulation, represented as '\x0b' or '\v' in Python)
-                    # U+0085 (Next Line, represented as '\x85' in Python)
-                    # Also ensure standard newline \n is covered, though usually not the culprit for "unknown chars"
+                    # U+000B (Line Tabulation) and U+0085 (Next Line)
+                    # Also ensure standard newline \n is covered
                     processed_content = content.replace('\x0b', '<br>') \
                                              .replace('\x85', '<br>') \
-                                             .replace('\n', '<br>') # Keep this for standard newlines too
+                                             .replace('\n', '<br>') 
 
                     # Apply formatting based on textStyle properties
                     if text_style.get('bold'):
@@ -85,28 +77,14 @@ def extract_formatted_html_from_elements(elements):
             
             full_paragraph_content = "".join(paragraph_html_parts)
 
-            # Check for genuinely empty paragraphs (after all processing)
-            temp_stripped_content = re.sub(r'<[^>]*>', '', full_paragraph_content).strip() # strip all HTML tags and whitespace
+            temp_stripped_content = re.sub(r'<[^>]*>', '', full_paragraph_content).strip()
 
             if temp_stripped_content == "":
-                # If the paragraph is truly empty of meaningful content (only spaces, newlines, or HRs)
                 if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
                      html_content += f"<p>{full_paragraph_content}</p>"
                 else:
-                     html_content += "<p></p>" # Truly empty paragraph
+                     html_content += "<p></p>"
             else:
-                # If there's actual content, wrap in <p> and ensure no redundant trailing <br>
-                # This logic tries to prevent a <br> from appearing immediately before a closing </p>
-                # if it's implicitly part of the paragraph structure from the API.
-                # If the content ends with a <br> that was *not* the only thing in the paragraph,
-                # we can strip it. This needs careful consideration.
-                
-                # A simpler, more robust approach is to let the `<br>` tags that are actual line breaks
-                # stay where they are, and just ensure the overall paragraph is wrapped.
-                # The frontend's CSS for `<p>` elements will handle block spacing.
-                # If the content ends with '<br>' and it's from a trailing newline *not* a soft break,
-                # it's usually benign within a <p> tag unless it causes double spacing.
-                # For now, let's just strip general whitespace and let the <br>s exist.
                 html_content += f"<p>{full_paragraph_content.strip()}</p>" 
 
         elif 'table' in element:
@@ -119,18 +97,13 @@ def extract_formatted_html_from_elements(elements):
             table_html += "</table>"
             html_content += table_html + "\n"
         
-        # Consider adding a specific handling for 'columnBreak' if needed, or if it appears as an unknown character
-        # For now, we'll assume it won't be in your typical content stream for speech.
-        # Other elements might also be encountered (e.g., list, embeddedObject, custom styles).
-        # You would need to inspect your document's JSON structure to handle these specifically.
-        
     return html_content
-
 
 # --- API Endpoint to Fetch Document Content ---
 @app.route('/get-doc-content', methods=['GET'])
 def get_document_content():
     # --- AUTHENTICATION CHECK ---
+    # VERIFIED: This correctly loads the API key from the environment variable.
     expected_api_key = os.environ.get('RAILWAY_APP_API_KEY')
     incoming_api_key = request.headers.get('X-API-Key')
 
