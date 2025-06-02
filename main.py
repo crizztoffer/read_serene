@@ -3,8 +3,9 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from googleapapi.errors import HttpError
 from flask_cors import CORS
+import re # Import for regular expressions
 
 # NEW IMPORTS FOR TEXT-TO-SPEECH
 from google.cloud import texttospeech
@@ -60,33 +61,54 @@ def extract_formatted_html_from_elements(elements):
                     content = text_run['textRun']['content']
                     text_style = text_run['textRun'].get('textStyle', {})
 
-                    # Apply formatting based on textStyle properties
-                    # It's good practice to use strong/em for semantic meaning over b/i
-                    if text_style.get('bold'):
-                        content = f"<strong>{content}</strong>"
-                    if text_style.get('italic'):
-                        content = f"<em>{content}</em>"
-                    if text_style.get('underline'):
-                        content = f"<u>{content}</u>"
-                    # Add more styles if needed (e.g., strikethrough, foregroundColor)
+                    # --- CRITICAL FIX FOR SHIFT+ENTER ---
+                    # Replace common non-standard line break characters with <br>
+                    # U+000B (Line Tabulation, represented as '\x0b' or '\v' in Python)
+                    # U+0085 (Next Line, represented as '\x85' in Python)
+                    # Also ensure standard newline \n is covered, though usually not the culprit for "unknown chars"
+                    processed_content = content.replace('\x0b', '<br>') \
+                                             .replace('\x85', '<br>') \
+                                             .replace('\n', '<br>') # Keep this for standard newlines too
 
-                    paragraph_html_parts.append(content)
+                    # Apply formatting based on textStyle properties
+                    if text_style.get('bold'):
+                        processed_content = f"<strong>{processed_content}</strong>"
+                    if text_style.get('italic'):
+                        processed_content = f"<em>{processed_content}</em>"
+                    if text_style.get('underline'):
+                        processed_content = f"<u>{processed_content}</u>"
+                    
+                    paragraph_html_parts.append(processed_content)
 
                 elif 'horizontalRule' in text_run:
                     paragraph_html_parts.append("<hr>")
             
-            # Join text runs for this paragraph
             full_paragraph_content = "".join(paragraph_html_parts)
 
-            # Check for empty paragraphs or those that only contain newlines
-            # Docs API often includes trailing newlines in 'content' of textRuns
-            # If the content is just a newline, treat it as a <br>
-            if full_paragraph_content.strip() == "\n":
-                html_content += "<br>"
-            elif full_paragraph_content.strip() == "":
-                html_content += "" # Or "<p></p>" if you want empty paragraphs
+            # Check for genuinely empty paragraphs (after all processing)
+            temp_stripped_content = re.sub(r'<[^>]*>', '', full_paragraph_content).strip() # strip all HTML tags and whitespace
+
+            if temp_stripped_content == "":
+                # If the paragraph is truly empty of meaningful content (only spaces, newlines, or HRs)
+                if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
+                     html_content += f"<p>{full_paragraph_content}</p>"
+                else:
+                     html_content += "<p></p>" # Truly empty paragraph
             else:
-                html_content += f"<p>{full_paragraph_content.strip()}</p>" # Wrap in p-tag and strip extra leading/trailing newlines
+                # If there's actual content, wrap in <p> and ensure no redundant trailing <br>
+                # This logic tries to prevent a <br> from appearing immediately before a closing </p>
+                # if it's implicitly part of the paragraph structure from the API.
+                # If the content ends with a <br> that was *not* the only thing in the paragraph,
+                # we can strip it. This needs careful consideration.
+                
+                # A simpler, more robust approach is to let the `<br>` tags that are actual line breaks
+                # stay where they are, and just ensure the overall paragraph is wrapped.
+                # The frontend's CSS for `<p>` elements will handle block spacing.
+                # If the content ends with '<br>' and it's from a trailing newline *not* a soft break,
+                # it's usually benign within a <p> tag unless it causes double spacing.
+                # For now, let's just strip general whitespace and let the <br>s exist.
+                html_content += f"<p>{full_paragraph_content.strip()}</p>" 
+
         elif 'table' in element:
             table_html = "<table>"
             for row in element['table']['tableRows']:
@@ -95,11 +117,13 @@ def extract_formatted_html_from_elements(elements):
                     table_html += f"<td>{extract_formatted_html_from_elements(cell['content'])}</td>"
                 table_html += "</tr>"
             table_html += "</table>"
-            html_content += table_html + "\n" # Add newline after table for separation
-        elif 'sectionBreak' in element or 'pageBreak' in element:
-            html_content += "<br><hr><br>" # Or some other visual separator
-        # Add other element types as needed (e.g., list, embeddedObject)
-        # For simplicity, this example primarily focuses on paragraphs and tables.
+            html_content += table_html + "\n"
+        
+        # Consider adding a specific handling for 'columnBreak' if needed, or if it appears as an unknown character
+        # For now, we'll assume it won't be in your typical content stream for speech.
+        # Other elements might also be encountered (e.g., list, embeddedObject, custom styles).
+        # You would need to inspect your document's JSON structure to handle these specifically.
+        
     return html_content
 
 
@@ -124,7 +148,8 @@ def get_document_content():
     try:
         service = get_docs_service()
         app.logger.info(f"Fetching document structure with ID: {document_id}")
-        # Fetch the document structure including tab content
+        
+        # Keep includeTabsContent=True as it's essential for your book/chapter structure
         document = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
         app.logger.info(f"Document structure fetched. Top-level keys: {list(document.keys())}")
@@ -135,13 +160,12 @@ def get_document_content():
             "books": []
         }
 
-        # --- MODIFIED LOGIC FOR HANDLING TABS AND EXTRACTING FORMATTED HTML ---
         if 'tabs' in document and document['tabs']:
             for i, tab_data in enumerate(document['tabs']):
                 tab_properties = tab_data.get('tabProperties', {})
                 document_tab = tab_data.get('documentTab', {})
                 tab_body = document_tab.get('body', {})
-                tab_content_elements = tab_body.get('content', []) # These are the raw JSON elements
+                tab_content_elements = tab_body.get('content', [])
 
                 book_entry = {
                     "title": tab_properties.get('title', f"Tab {i+1}"),
@@ -152,24 +176,18 @@ def get_document_content():
                 current_chapter = None
                 chapter_counter = 0
 
-                # Process elements within the current tab to build chapters
                 for element in tab_content_elements:
                     named_style_type = None
                     if 'paragraph' in element:
                         named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
 
-                    # Extract formatted HTML for the current element
-                    element_html_content = extract_formatted_html_from_elements([element]) # Pass as list because extract_formatted_html_from_elements expects iterable
+                    element_html_content = extract_formatted_html_from_elements([element])
 
                     if named_style_type == 'HEADING_1':
                         if current_chapter:
                             book_entry['chapters'].append(current_chapter)
                         chapter_counter += 1
-                        # Heading number/title usually shouldn't contain HTML tags from b/i/u, strip them if present
-                        chapter_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
-                        # Use a simple regex to strip other HTML tags for number/title if they occur
-                        import re
-                        chapter_text_content = re.sub(r'<[^>]*>', '', chapter_text_content)
+                        chapter_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
 
                         current_chapter = {
                             "number": chapter_text_content,
@@ -178,18 +196,14 @@ def get_document_content():
                             "id": f"chapter-{book_entry['id']}-{chapter_counter}"
                         }
                     elif named_style_type == 'SUBTITLE':
-                        # Subtitle content should also be stripped of HTML tags for display as 'title'
-                        subtitle_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
-                        import re
-                        subtitle_text_content = re.sub(r'<[^>]*>', '', subtitle_text_content)
+                        subtitle_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
 
                         if current_chapter and not current_chapter['title']:
                             current_chapter['title'] = subtitle_text_content
                         else:
-                            # If a subtitle appears without a preceding HEADING_1, treat it as general content
                             if current_chapter:
                                 current_chapter['content'] += element_html_content
-                            else: # Introduction chapter case
+                            else:
                                 if not book_entry['chapters'] and not current_chapter:
                                     chapter_counter += 1
                                     current_chapter = {
@@ -199,10 +213,10 @@ def get_document_content():
                                     book_entry['chapters'].append(current_chapter)
                                 if current_chapter:
                                     current_chapter['content'] += element_html_content
-                    else: # General body text or other elements
+                    else:
                         if current_chapter:
                             current_chapter['content'] += element_html_content
-                        else: # Introduction chapter case
+                        else:
                             if not book_entry['chapters'] and not current_chapter:
                                 chapter_counter += 1
                                 current_chapter = {
@@ -213,18 +227,17 @@ def get_document_content():
                             if current_chapter:
                                 current_chapter['content'] += element_html_content
 
-                if current_chapter: # Append the last chapter if it exists
+                if current_chapter:
                     book_entry['chapters'].append(current_chapter)
 
                 parsed_data['books'].append(book_entry)
         else:
-            # Fallback for documents without explicit 'tabs'
             app.logger.warning("No 'tabs' found in document response. Assuming single main body.")
             main_body_content_elements = document.get('body', {}).get('content', [])
             
             single_book_entry = {
                 "title": document.get('title', 'Main Document'),
-                "id": "tab-main",
+                "id": "book-main",
                 "chapters": []
             }
 
@@ -235,16 +248,14 @@ def get_document_content():
                 named_style_type = None
                 if 'paragraph' in element:
                     named_style_type = element['paragraph'].get('paragraphStyle', {}).get('namedStyleType')
-                
+                    
                 element_html_content = extract_formatted_html_from_elements([element])
 
                 if named_style_type == 'HEADING_1':
                     if current_chapter:
                         single_book_entry['chapters'].append(current_chapter)
                     chapter_counter += 1
-                    chapter_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
-                    import re
-                    chapter_text_content = re.sub(r'<[^>]*>', '', chapter_text_content)
+                    chapter_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
                     current_chapter = {
                         "number": chapter_text_content,
                         "title": "",
@@ -252,9 +263,7 @@ def get_document_content():
                         "id": f"chapter-main-{chapter_counter}"
                     }
                 elif named_style_type == 'SUBTITLE':
-                    subtitle_text_content = element_html_content.replace('<p>', '').replace('</p>', '').strip()
-                    import re
-                    subtitle_text_content = re.sub(r'<[^>]*>', '', subtitle_text_content)
+                    subtitle_text_content = re.sub(r'<[^>]*>', '', element_html_content).strip()
                     if current_chapter and not current_chapter['title']:
                         current_chapter['title'] = subtitle_text_content
                     else:
@@ -284,12 +293,11 @@ def get_document_content():
                         if current_chapter:
                             current_chapter['content'] += element_html_content
 
-            if current_chapter: # Append the last chapter if it exists
+            if current_chapter:
                 single_book_entry['chapters'].append(current_chapter)
 
             parsed_data['books'].append(single_book_entry)
 
-        # Filter out books with no chapters after processing
         parsed_data['books'] = [book for book in parsed_data['books'] if book['chapters']]
 
         return jsonify(parsed_data)
@@ -332,16 +340,7 @@ def synthesize_speech_endpoint():
         credentials = get_google_cloud_credentials()
         client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        # IMPORTANT: If your text_content now contains HTML tags (like <strong>),
-        # the Text-to-Speech API needs to interpret them as SSML.
-        # So, you MUST use `ssml_text` instead of `text`.
-        # This means the frontend should send content with proper SSML tags
-        # OR you convert basic HTML to SSML here.
-        # For b/i/u, basic HTML like <strong> is often fine if passed as 'text',
-        # but for full SSML power, use `ssml_text`.
-        # For now, let's stick to 'text' as it often handles basic HTML for speech synthesis.
-        # If TTS output sounds strange with formatting, consider converting to SSML here.
-        synthesis_input = texttospeech.SynthesisInput(text=text_content) # Keep as text for simplicity now
+        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
 
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
