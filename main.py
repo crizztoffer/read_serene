@@ -347,20 +347,3 @@ def synthesize_speech_endpoint():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-
-```
-
-**Key Changes in `synthesize_speech_endpoint`:**
-
-1.  **`ssml_content = data.get('ssml')`**: This line now correctly retrieves the `ssml` parameter that your frontend is sending.
-2.  **Removed `text_content = data.get('text')`**: The backend no longer expects or tries to get a `text` parameter from the incoming JSON for synthesis (though you could keep it as a fallback if you had other parts of your app that might send plain text).
-3.  **Updated `if not all([ssml_content, voice_name, language_code]):`**: The validation now specifically checks for `ssml_content` instead of `text_content`.
-4.  **`synthesis_input = texttospeech.SynthesisInput(ssml=ssml_content)`**: This is the most crucial change. It tells the Google Cloud Text-to-Speech API to interpret the `ssml_content` as SSML, enabling it to correctly apply the `<break>` tags and other SSML features.
-5.  **Logging**: Changed logging to show the `ssml_content` being sent.
-
-**To make your system functional again with the SSML changes:**
-
-1.  **Replace the `synthesize_speech_endpoint` function in your live Python backend script with the updated version provided above.**
-2.  **Deploy this updated Python backend.**
-
-Once deployed, your frontend (which is already sending SSML) will correctly communicate with the backend, and you should start hearing the inferred pauses as intend
