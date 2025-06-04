@@ -81,9 +81,9 @@ def extract_formatted_html_from_elements(elements):
 
             if temp_stripped_content == "":
                 if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
-                     html_content += f"<p>{full_paragraph_content}</p>"
+                    html_content += f"<p>{full_paragraph_content}</p>"
                 else:
-                     html_content += "<p></p>"
+                    html_content += "<p></p>"
             else:
                 html_content += f"<p>{full_paragraph_content.strip()}</p>" 
 
@@ -96,7 +96,7 @@ def extract_formatted_html_from_elements(elements):
                 table_html += "</tr>"
             table_html += "</table>"
             html_content += table_html + "\n"
-        
+            
     return html_content
 
 # --- API Endpoint to Fetch Document Content ---
@@ -294,7 +294,7 @@ def get_document_content():
 def synthesize_speech_endpoint():
     """
     API endpoint to synthesize speech using Google Cloud Text-to-Speech.
-    Expects JSON payload with 'text', 'voiceName', 'languageCode'.
+    Expects JSON payload with 'ssml', 'voiceName', 'languageCode'.
     Returns base64 encoded audio content.
     """
     # Basic request validation
@@ -302,18 +302,21 @@ def synthesize_speech_endpoint():
         return jsonify({"error": "Request must be JSON"}), 400
 
     data = request.get_json()
-    text_content = data.get('text')
+    ssml_content = data.get('ssml')  # <--- CHANGED: Now explicitly getting 'ssml'
     voice_name = data.get('voiceName')
     language_code = data.get('languageCode')
 
-    if not all([text_content, voice_name, language_code]):
-        return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
+    # Updated validation to check for 'ssml' instead of 'text'
+    if not all([ssml_content, voice_name, language_code]):
+        return jsonify({"error": "Missing required parameters: ssml, voiceName, or languageCode"}), 400
 
     try:
         credentials = get_google_cloud_credentials()
         client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
+        # Use SSML input
+        synthesis_input = texttospeech.SynthesisInput(ssml=ssml_content) # <--- CRITICAL CHANGE: Using ssml=
+        app.logger.info(f"Synthesizing SSML: {ssml_content[:100]}...") # Log first 100 chars of SSML
 
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
@@ -339,8 +342,25 @@ def synthesize_speech_endpoint():
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
         if "credentials were not found" in str(e):
-             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
+            return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
+```
+
+**Key Changes in `synthesize_speech_endpoint`:**
+
+1.  **`ssml_content = data.get('ssml')`**: This line now correctly retrieves the `ssml` parameter that your frontend is sending.
+2.  **Removed `text_content = data.get('text')`**: The backend no longer expects or tries to get a `text` parameter from the incoming JSON for synthesis (though you could keep it as a fallback if you had other parts of your app that might send plain text).
+3.  **Updated `if not all([ssml_content, voice_name, language_code]):`**: The validation now specifically checks for `ssml_content` instead of `text_content`.
+4.  **`synthesis_input = texttospeech.SynthesisInput(ssml=ssml_content)`**: This is the most crucial change. It tells the Google Cloud Text-to-Speech API to interpret the `ssml_content` as SSML, enabling it to correctly apply the `<break>` tags and other SSML features.
+5.  **Logging**: Changed logging to show the `ssml_content` being sent.
+
+**To make your system functional again with the SSML changes:**
+
+1.  **Replace the `synthesize_speech_endpoint` function in your live Python backend script with the updated version provided above.**
+2.  **Deploy this updated Python backend.**
+
+Once deployed, your frontend (which is already sending SSML) will correctly communicate with the backend, and you should start hearing the inferred pauses as intend
