@@ -81,9 +81,9 @@ def extract_formatted_html_from_elements(elements):
 
             if temp_stripped_content == "":
                 if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
-                    html_content += f"<p>{full_paragraph_content}</p>"
+                     html_content += f"<p>{full_paragraph_content}</p>"
                 else:
-                    html_content += "<p></p>"
+                     html_content += "<p></p>"
             else:
                 html_content += f"<p>{full_paragraph_content.strip()}</p>" 
 
@@ -96,7 +96,7 @@ def extract_formatted_html_from_elements(elements):
                 table_html += "</tr>"
             table_html += "</table>"
             html_content += table_html + "\n"
-            
+        
     return html_content
 
 # --- API Endpoint to Fetch Document Content ---
@@ -294,7 +294,7 @@ def get_document_content():
 def synthesize_speech_endpoint():
     """
     API endpoint to synthesize speech using Google Cloud Text-to-Speech.
-    Expects JSON payload with 'ssml', 'voiceName', 'languageCode'.
+    Expects JSON payload with 'text', 'voiceName', 'languageCode'.
     Returns base64 encoded audio content.
     """
     # Basic request validation
@@ -302,21 +302,18 @@ def synthesize_speech_endpoint():
         return jsonify({"error": "Request must be JSON"}), 400
 
     data = request.get_json()
-    ssml_content = data.get('ssml')  # <--- CHANGED: Now explicitly getting 'ssml'
+    text_content = data.get('text')
     voice_name = data.get('voiceName')
     language_code = data.get('languageCode')
 
-    # Updated validation to check for 'ssml' instead of 'text'
-    if not all([ssml_content, voice_name, language_code]):
-        return jsonify({"error": "Missing required parameters: ssml, voiceName, or languageCode"}), 400
+    if not all([text_content, voice_name, language_code]):
+        return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
 
     try:
         credentials = get_google_cloud_credentials()
         client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        # Use SSML input
-        synthesis_input = texttospeech.SynthesisInput(ssml=ssml_content) # <--- CRITICAL CHANGE: Using ssml=
-        app.logger.info(f"Synthesizing SSML: {ssml_content[:100]}...") # Log first 100 chars of SSML
+        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
 
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
@@ -342,7 +339,7 @@ def synthesize_speech_endpoint():
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
         if "credentials were not found" in str(e):
-            return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
+             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
 if __name__ == '__main__':
