@@ -81,9 +81,9 @@ def extract_formatted_html_from_elements(elements):
 
             if temp_stripped_content == "":
                 if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
-                    html_content += f"<p>{full_paragraph_content}</p>"
+                     html_content += f"<p>{full_paragraph_content}</p>"
                 else:
-                    html_content += "<p></p>"
+                     html_content += "<p></p>"
             else:
                 html_content += f"<p>{full_paragraph_content.strip()}</p>" 
 
@@ -96,7 +96,7 @@ def extract_formatted_html_from_elements(elements):
                 table_html += "</tr>"
             table_html += "</table>"
             html_content += table_html + "\n"
-            
+        
     return html_content
 
 # --- API Endpoint to Fetch Document Content ---
@@ -313,14 +313,7 @@ def synthesize_speech_endpoint():
         credentials = get_google_cloud_credentials()
         client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        # Wrap the text content in <speak> tags to ensure it's valid SSML markup
-        # This is crucial for the <break time="0.5s"/> tags to be interpreted by Chirp 3 HD
-        ssml_to_send = f"<speak>{text_content}</speak>" 
-        
-        # Use the 'ssml' parameter for SynthesisInput when sending SSML content
-        synthesis_input = texttospeech.SynthesisInput(ssml=ssml_to_send) 
-
-        app.logger.info(f"Synthesizing SSML for Chirp3 HD: {ssml_to_send[:100]}...") # Log first 100 chars of SSML
+        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
 
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
@@ -346,7 +339,7 @@ def synthesize_speech_endpoint():
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
         if "credentials were not found" in str(e):
-            return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
+             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
 if __name__ == '__main__':
