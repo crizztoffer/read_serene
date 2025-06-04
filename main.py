@@ -313,7 +313,7 @@ def synthesize_speech_endpoint():
         credentials = get_google_cloud_credentials()
         client = texttospeech.TextToSpeechClient(credentials=credentials)
 
-        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
+        synthesis_input = texttospeech.SynthesisInput(markup=text_content) 
 
         voice_params = texttospeech.VoiceSelectionParams(
             language_code=language_code,
