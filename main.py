@@ -10,6 +10,7 @@ import re
 # NEW IMPORTS FOR TEXT-TO-SPEECH
 from google.cloud import texttospeech
 import base64
+from functools import lru_cache # Import lru_cache for caching
 
 app = Flask(__name__)
 CORS(app)
@@ -59,8 +60,8 @@ def extract_formatted_html_from_elements(elements):
                     # U+000B (Line Tabulation) and U+0085 (Next Line)
                     # Also ensure standard newline \n is covered
                     processed_content = content.replace('\x0b', '<br>') \
-                                             .replace('\x85', '<br>') \
-                                             .replace('\n', '<br>') 
+                                     .replace('\x85', '<br>') \
+                                     .replace('\n', '<br>') 
 
                     # Apply formatting based on textStyle properties
                     if text_style.get('bold'):
@@ -96,7 +97,7 @@ def extract_formatted_html_from_elements(elements):
                 table_html += "</tr>"
             table_html += "</table>"
             html_content += table_html + "\n"
-        
+            
     return html_content
 
 # --- API Endpoint to Fetch Document Content ---
@@ -289,6 +290,34 @@ def get_document_content():
         return jsonify({"error": f"An unexpected server error occurred: {e}"}), 500
 
 
+# Use lru_cache to cache the synthesis results. Max size can be adjusted.
+# It's important that `_synthesize_speech_cached` is outside the Flask route function
+# because lru_cache doesn't work directly on methods decorated with @app.route.
+@lru_cache(maxsize=128) # Cache up to 128 unique speech synthesis results. Adjust as needed.
+def _synthesize_speech_cached(text_content, voice_name, language_code):
+    """Internal helper to synthesize speech with caching."""
+    app.logger.info(f"Synthesizing speech for text: '{text_content[:50]}...' with voice: {voice_name}, lang: {language_code}")
+    credentials = get_google_cloud_credentials()
+    client = texttospeech.TextToSpeechClient(credentials=credentials)
+
+    synthesis_input = texttospeech.SynthesisInput(text=text_content) 
+
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice_name,
+    )
+
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3
+    )
+
+    response = client.synthesize_speech(
+        input=synthesis_input, voice=voice_params, audio_config=audio_config
+    )
+
+    audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
+    return audio_base64
+
 # --- NEW: API Endpoint to Synthesize Speech ---
 @app.route('/synthesize-speech', methods=['POST'])
 def synthesize_speech_endpoint():
@@ -296,6 +325,7 @@ def synthesize_speech_endpoint():
     API endpoint to synthesize speech using Google Cloud Text-to-Speech.
     Expects JSON payload with 'text', 'voiceName', 'languageCode'.
     Returns base64 encoded audio content.
+    Includes caching to prevent duplicate TTS calls.
     """
     # Basic request validation
     if not request.is_json:
@@ -310,25 +340,8 @@ def synthesize_speech_endpoint():
         return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
 
     try:
-        credentials = get_google_cloud_credentials()
-        client = texttospeech.TextToSpeechClient(credentials=credentials)
-
-        synthesis_input = texttospeech.SynthesisInput(text=text_content) 
-
-        voice_params = texttospeech.VoiceSelectionParams(
-            language_code=language_code,
-            name=voice_name,
-        )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3
-        )
-
-        response = client.synthesize_speech(
-            input=synthesis_input, voice=voice_params, audio_config=audio_config
-        )
-
-        audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
+        # Call the cached synthesis function
+        audio_base64 = _synthesize_speech_cached(text_content, voice_name, language_code)
 
         return jsonify({
             "success": True,
