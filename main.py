@@ -6,6 +6,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from flask_cors import CORS
 import re
+import requests # Import the requests library for making HTTP requests
 
 # NEW IMPORTS FOR TEXT-TO-SPEECH
 from google.cloud import texttospeech
@@ -60,8 +61,8 @@ def extract_formatted_html_from_elements(elements):
                     # U+000B (Line Tabulation) and U+0085 (Next Line)
                     # Also ensure standard newline \n is covered
                     processed_content = content.replace('\x0b', '<br>') \
-                                     .replace('\x85', '<br>') \
-                                     .replace('\n', '<br>') 
+                                         .replace('\x85', '<br>') \
+                                         .replace('\n', '<br>') 
 
                     # Apply formatting based on textStyle properties
                     if text_style.get('bold'):
@@ -82,9 +83,9 @@ def extract_formatted_html_from_elements(elements):
 
             if temp_stripped_content == "":
                 if '<br>' in full_paragraph_content or '<hr>' in full_paragraph_content:
-                     html_content += f"<p>{full_paragraph_content}</p>"
+                    html_content += f"<p>{full_paragraph_content}</p>"
                 else:
-                     html_content += "<p></p>"
+                    html_content += "<p></p>"
             else:
                 html_content += f"<p>{full_paragraph_content.strip()}</p>" 
 
@@ -352,8 +353,38 @@ def synthesize_speech_endpoint():
     except Exception as e:
         app.logger.error(f"Error synthesizing speech: {e}", exc_info=True)
         if "credentials were not found" in str(e):
-             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
+            return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
+
+# --- NEW: API Endpoint to Fetch Google TTS Voices using API Key ---
+@app.route('/get-google-tts-voices', methods=['GET'])
+def get_google_tts_voices_endpoint():
+    """
+    API endpoint to fetch available Google TTS voices using a Google API Key from environment variables.
+    This acts as a proxy for the Google Text-to-Speech v1/voices endpoint.
+    """
+    google_api_key = os.environ.get('google_api')
+
+    if not google_api_key:
+        app.logger.error("The 'google_api' environment variable is not set.")
+        return jsonify({"error": "Server configuration error: Google API key not set for voice listing."}), 500
+
+    try:
+        # Construct the URL for the Google Text-to-Speech v1/voices API
+        google_tts_voices_api_url = f"https://texttospeech.googleapis.com/v1/voices?key={google_api_key}"
+        
+        # Make the request to Google's TTS API
+        response = requests.get(google_tts_voices_api_url)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        
+        return jsonify(response.json())
+        
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Error fetching Google TTS voices: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to fetch Google TTS voices: {str(e)}"}), 500
+    except Exception as e:
+        app.logger.error(f"An unexpected error occurred while fetching voices: {e}", exc_info=True)
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
