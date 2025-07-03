@@ -308,16 +308,17 @@ def _synthesize_speech_cached(text_content, voice_name, language_code):
     )
 
     audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3,
-        enable_word_time_offsets=True # Enable word timing offsets for timestamp generation
+        audio_encoding=texttospeech.AudioEncoding.MP3
+        # Removed enable_word_time_offsets=True as it's not supported by the current library version
     )
 
     response = client.synthesize_speech(
         input=synthesis_input, voice=voice_params, audio_config=audio_config
     )
 
-    audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
-    return audio_base64, response.word_timings # Return word timings along with audio
+    # We can no longer return response.word_timings directly as it's not enabled.
+    # The proportional timestamping logic will rely on segment duration.
+    return base64.b64encode(response.audio_content).decode('utf-8'), [] # Return empty list for word_timings
 
 # --- NEW LOGIC FOR SPEECH SYNTHESIS INTEGRATION ---
 
@@ -356,7 +357,7 @@ def process_paragraphs_for_synthesis(paragraphs_data):
             # Add 1 for the space that will be used to join paragraphs if the buffer is not empty
             potential_new_char_count = current_narration_char_count + len(text) + (1 if current_narration_buffer else 0)
             
-            if current_narration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
+            if current_naration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
                 # If buffer exists and new text exceeds limit, finalize the current buffer
                 synthesis_segments.append({
                     "text": " ".join(current_narration_buffer),
@@ -401,223 +402,11 @@ def process_paragraphs_for_synthesis(paragraphs_data):
         })
     return synthesis_segments
 
-def process_tts_response_for_timestamps(word_timings, synthesized_text_chunk, original_paragraphs_meta_in_chunk):
-    """
-    Processes word timings from TTS response to generate paragraph-level timestamps.
-    This function needs to map the words in the synthesized_text_chunk back to
-    their original paragraphs.
-    """
-    timestamps = []
-    
-    # Create a map of original paragraph texts to their metadata and their start/end offsets
-    # within the `synthesized_text_chunk`.
-    # This is tricky because `synthesized_text_chunk` might have joined paragraphs with spaces.
-    
-    # Let's build a robust mapping of character positions in the synthesized_text_chunk
-    # back to the original paragraph indices.
-    
-    char_map = [] # List of (char_index_in_chunk, original_paragraph_meta)
-    current_chunk_char_idx = 0
-    for p_meta in original_paragraphs_meta_in_chunk:
-        for char_in_p in p_meta['text']:
-            char_map.append((current_chunk_char_idx, p_meta))
-            current_chunk_char_idx += 1
-        # Add space if it's not the last paragraph and it's a narration chunk (joined with spaces)
-        # This is an approximation; exact spacing depends on how ' '.join() works.
-        if p_meta != original_paragraphs_meta_in_chunk[-1]:
-             char_map.append((current_chunk_char_idx, p_meta)) # Associate space with the end of current paragraph
-             current_chunk_char_idx += 1
-
-    # Initialize paragraph timestamps
-    paragraph_timestamps = {} # Key: (pageNumber, paragraphIndexOnPage) -> {start_time_ms, end_time_ms}
-
-    for word_info in word_timings:
-        word_text = word_info.text_content
-        start_time_seconds = word_info.start_time.seconds + word_info.start_time.nanos * 1e-9
-        end_time_seconds = word_info.end_time.seconds + word_info.end_time.nanos * 1e-9
-
-        # Find the starting character index of this word in the synthesized_text_chunk
-        # This is a simple find, but might need more robustness for repeated words.
-        # For now, we'll assume words are unique enough within a short window.
-        
-        # We need to find the *first* occurrence of the word after the previous word's end.
-        # This is a common challenge with TTS word timings.
-        # A more robust approach might involve fuzzy matching or a more complex character alignment.
-        
-        # For now, let's simplify and use the original paragraph metadata directly.
-        # The assumption is that `word_timings` are ordered and correspond to `synthesized_text_chunk`.
-        
-        # The simplest approach is to assign the start time of the first word
-        # of a paragraph to its start_time_ms and the end time of its last word to end_time_ms.
-        # This requires knowing which words belong to which original paragraph.
-        # This is why `original_paragraphs_meta` is crucial.
-
-        # Let's iterate through the original_paragraphs_meta to assign times
-        # This approach is more reliable than trying to map words back to original text.
-        # We'll use the cumulative duration of words.
-
-        # This needs a more sophisticated mapping. Let's re-think this.
-        # The word_timings are for the *entire synthesized_text_chunk*.
-        # We need to find the boundaries of the original paragraphs *within* that chunk.
-
-        # A better approach:
-        # 1. Iterate through `original_paragraphs_meta_in_chunk`.
-        # 2. For each original paragraph, find its text within `synthesized_text_chunk`.
-        # 3. Then, find the word timings that fall within that text's boundaries.
-
-    current_char_idx_in_chunk = 0
-    for p_meta in original_paragraphs_meta_in_chunk:
-        original_text = p_meta['text']
-        
-        # Find the start and end character indices of this original paragraph's text
-        # within the full synthesized_text_chunk.
-        # This `find` needs to be careful for consecutive paragraphs joined by spaces.
-        # `synthesized_text_chunk` is formed by " ".join(current_narration_buffer)
-        
-        # Let's rebuild the `synthesized_text_chunk` with markers for paragraph boundaries
-        # to help with mapping. This is a common technique.
-        
-        # This function should ideally be called *after* `_synthesize_speech_cached`
-        # and given the exact `synthesized_text_chunk` that was sent to TTS.
-        # And the `original_paragraphs_meta_in_chunk` should contain the actual text
-        # that was used to form the chunk.
-
-        # A more robust timestamp generation:
-        # We need to align the `word_timings` to the `original_paragraphs_meta`.
-        # This is best done by building a cumulative character map for the `synthesized_text_chunk`.
-
-        word_idx = 0
-        current_chunk_offset = 0 # Tracks position in synthesized_text_chunk
-        
-        for p_idx, p_meta in enumerate(original_paragraphs_meta_in_chunk):
-            p_start_time_ms = -1
-            p_end_time_ms = -1
-            
-            # Text of the original paragraph within the chunk
-            # This is the exact text that was part of the combined chunk
-            paragraph_text_in_chunk = p_meta['text'] # Assuming 'text' is clean
-
-            # Find the start and end character indices of this paragraph's content within the full chunk
-            # This is simplified; assumes perfect match and no overlapping words.
-            start_char_in_chunk = synthesized_text_chunk.find(paragraph_text_in_chunk, current_chunk_offset)
-            if start_char_in_chunk == -1:
-                app.logger.warning(f"Could not find original paragraph text '{paragraph_text_in_chunk[:30]}...' in synthesized chunk.")
-                continue # Skip this paragraph if its text isn't found
-
-            end_char_in_chunk = start_char_in_chunk + len(paragraph_text_in_chunk)
-            current_chunk_offset = end_char_in_chunk # Update offset for next paragraph
-
-            # Iterate through word_timings to find words belonging to this paragraph
-            for i in range(word_idx, len(word_timings)):
-                word_info = word_timings[i]
-                word_start_time_ms = int((word_info.start_time.seconds + word_info.start_time.nanos * 1e-9) * 1000)
-                word_end_time_ms = int((word_info.end_time.seconds + word_info.end_time.nanos * 1e-9) * 1000)
-                
-                # Check if the word's text content is part of the current paragraph's text
-                # This is a heuristic. A more robust way would be to track character offsets.
-                # For simplicity, let's assume word_timings are sequential and map to the combined text.
-                
-                # If this is the first word for this paragraph
-                if p_start_time_ms == -1:
-                    p_start_time_ms = word_start_time_ms
-                
-                p_end_time_ms = word_end_time_ms # Always update with the latest word's end time
-
-                # Check if the next word (if any) would belong to a *different* original paragraph
-                # This is the tricky part for concatenated narration.
-                # We need to know when a sequence of words from `word_timings` transitions from one
-                # `original_paragraphs_meta` entry to the next.
-
-                # Let's simplify: the `word_timings` are for the *entire segment*.
-                # We need to calculate the relative position of each original paragraph within that segment.
-                # Then, find the words whose timings fall within that relative range.
-
-                # This is a very common and non-trivial problem. The best way is to send SSML
-                # to TTS with <mark> tags for each paragraph, but that requires more complex parsing
-                # and might hit character limits faster.
-
-                # For now, let's use a simpler, cumulative time approach.
-                # Each `segment` has `original_paragraphs_meta`.
-                # The total duration of the `segment`'s audio is known.
-                # We can proportionally distribute that duration among the `original_paragraphs_meta`
-                # based on their character count. This is less accurate but simpler.
-
-                # Let's revert to a more direct approach for `process_tts_response_for_timestamps`
-                # that uses the `word_timings` and tries to map them to the original paragraphs.
-                # This requires the `synthesized_text_chunk` and `original_paragraphs_meta_in_chunk`
-                # to be carefully aligned.
-
-                # Re-implementing based on character offsets within the `synthesized_text_chunk`
-                # This is more robust.
-                
-                # Build a character-to-paragraph mapping for the synthesized chunk
-                char_to_paragraph_map = {} # {char_index_in_chunk: (pageNumber, paragraphIndexOnPage)}
-                current_char_in_chunk = 0
-                for p_meta in original_paragraphs_meta_in_chunk:
-                    # Add paragraph text
-                    for char in p_meta['text']:
-                        char_to_paragraph_map[current_char_in_chunk] = (p_meta['pageNumber'], p_meta['paragraphIndexOnPage'])
-                        current_char_in_chunk += 1
-                    # Add a space if it's not the last paragraph and it's a narration chunk
-                    # (assuming ' '.join() added a space)
-                    if p_meta != original_paragraphs_meta_in_chunk[-1] and segment['type'] == 'narration':
-                        char_to_paragraph_map[current_char_in_chunk] = (p_meta['pageNumber'], p_meta['paragraphIndexOnPage']) # Associate space with previous paragraph
-                        current_char_in_chunk += 1
-                        
-                # Now process word timings
-                for word_info in word_timings:
-                    word_start_time_ms = int((word_info.start_time.seconds + word_info.start_time.nanos * 1e-9) * 1000)
-                    word_end_time_ms = int((word_info.end_time.seconds + word_info.end_time.nanos * 1e-9) * 1000)
-                    
-                    # Find the character position of this word in the synthesized chunk
-                    # This is a bit tricky. `word_info.text_content` might not be an exact substring match
-                    # due to normalization by TTS.
-                    # A more reliable way is to use `word_info.start_index` and `end_index` if available,
-                    # but Google Cloud TTS `word_timings` don't provide character indices directly.
-                    
-                    # Let's use a robust string searching approach with a running offset.
-                    # This is still heuristic but better than blind `find`.
-                    
-                    # For simplicity and to avoid complex string alignment, let's assume the order of words
-                    # in `word_timings` matches the order of words in `synthesized_text_chunk`.
-                    # We will rely on `original_paragraphs_meta_in_chunk` to tell us which original
-                    # paragraphs are part of this `synthesized_text_chunk`.
-
-                    # This is the most challenging part. Let's use a simpler approach for now
-                    # and refine if needed.
-                    # We will assume that the `word_timings` are for the `synthesized_text_chunk`
-                    # and we need to distribute the total time across the `original_paragraphs_meta_in_chunk`.
-                    
-                    # A proportional distribution is often the fallback if word-to-paragraph mapping is hard.
-                    # Total characters in the combined chunk
-                    total_chars_in_chunk_for_timing = sum(len(p['text']) for p in original_paragraphs_meta_in_chunk)
-                    if total_chars_in_chunk_for_timing == 0:
-                        continue # Avoid division by zero
-
-                    # Total duration of the synthesized audio chunk
-                    total_audio_duration_ms = word_timings[-1].end_time.seconds * 1000 + word_timings[-1].end_time.nanos * 1e-6 if word_timings else 0
-
-                    cumulative_char_count = 0
-                    for p_meta in original_paragraphs_meta_in_chunk:
-                        paragraph_char_count = len(p_meta['text'])
-                        
-                        # Calculate start and end time for this paragraph proportionally
-                        start_time_ms = (cumulative_char_count / total_chars_in_chunk_for_timing) * total_audio_duration_ms
-                        cumulative_char_count += paragraph_char_count
-                        end_time_ms = (cumulative_char_count / total_chars_in_chunk_for_timing) * total_audio_duration_ms
-
-                        timestamps.append({
-                            "pageNumber": p_meta['pageNumber'],
-                            "paragraphIndexOnPage": p_meta['paragraphIndexOnPage'],
-                            "start_time_ms": int(start_time_ms),
-                            "end_time_ms": int(end_time_ms)
-                        })
-                        
-                        # Add 1 for the space if it's a narration chunk and not the last paragraph
-                        if p_meta != original_paragraphs_meta_in_chunk[-1] and segment['type'] == 'narration':
-                            cumulative_char_count += 1 # Account for the space in total characters for proportion
-
-    return timestamps
+# The process_tts_response_for_timestamps function is no longer needed
+# because we are relying on proportional timestamping based on segment duration
+# directly within the synthesize_chapter_audio_endpoint.
+# def process_tts_response_for_timestamps(...):
+#     ... (removed) ...
 
 
 @app.route('/synthesize-chapter-audio', methods=['POST'])
@@ -704,14 +493,14 @@ def synthesize_chapter_audio_endpoint():
                     app.logger.warning(f"Skipping synthesis for empty text segment {i} on page {page_num}.")
                     continue
 
-                audio_base64, word_timings = _synthesize_speech_cached(segment_text, voice_name, language_code)
+                # _synthesize_speech_cached now returns audio_base64 and an empty list for word_timings
+                audio_base64, _ = _synthesize_speech_cached(segment_text, voice_name, language_code) 
                 audio_content_bytes = base64.b64decode(audio_base64)
                 
                 audio_segment_pydub = AudioSegment.from_file(io.BytesIO(audio_content_bytes), format="mp3")
                 individual_audio_segments_pydub.append(audio_segment_pydub)
 
                 # Generate timestamps for the original paragraphs within this *segment*
-                # using the word timings for this *segment*.
                 # This is the proportionally distributed timestamping.
                 segment_duration_ms = audio_segment_pydub.duration_seconds * 1000
                 total_chars_in_segment = sum(len(p['text']) for p in segment["original_paragraphs_meta"])
