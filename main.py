@@ -6,12 +6,18 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from flask_cors import CORS
 import re
-import requests # Import the requests library for making HTTP requests
+import requests
+from bs4 import BeautifulSoup
 
 # NEW IMPORTS FOR TEXT-TO-SPEECH
 from google.cloud import texttospeech
 import base64
-from functools import lru_cache # Import lru_cache for caching
+from functools import lru_cache
+
+# NEW IMPORT for pydub
+from pydub import AudioSegment
+import tempfile # For creating temporary files and directories
+import shutil # For cleaning up temporary directories
 
 app = Flask(__name__)
 CORS(app)
@@ -56,15 +62,10 @@ def extract_formatted_html_from_elements(elements):
                     content = text_run['textRun']['content']
                     text_style = text_run['textRun'].get('textStyle', {})
 
-                    # --- CRITICAL FIX FOR SHIFT+ENTER ---
-                    # Replace common non-standard line break characters with <br>
-                    # U+000B (Line Tabulation) and U+0085 (Next Line)
-                    # Also ensure standard newline \n is covered
                     processed_content = content.replace('\x0b', '<br>') \
                                          .replace('\x85', '<br>') \
                                          .replace('\n', '<br>') 
 
-                    # Apply formatting based on textStyle properties
                     if text_style.get('bold'):
                         processed_content = f"<strong>{processed_content}</strong>"
                     if text_style.get('italic'):
@@ -105,7 +106,6 @@ def extract_formatted_html_from_elements(elements):
 @app.route('/get-doc-content', methods=['GET'])
 def get_document_content():
     # --- AUTHENTICATION CHECK ---
-    # VERIFIED: This correctly loads the API key from the environment variable.
     expected_api_key = os.environ.get('RAILWAY_APP_API_KEY')
     incoming_api_key = request.headers.get('X-API-Key')
 
@@ -124,7 +124,6 @@ def get_document_content():
         service = get_docs_service()
         app.logger.info(f"Fetching document structure with ID: {document_id}")
         
-        # Keep includeTabsContent=True as it's essential for your book/chapter structure
         document = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
         app.logger.info(f"Document structure fetched. Top-level keys: {list(document.keys())}")
@@ -292,8 +291,6 @@ def get_document_content():
 
 
 # Use lru_cache to cache the synthesis results. Max size can be adjusted.
-# It's important that `_synthesize_speech_cached` is outside the Flask route function
-# because lru_cache doesn't work directly on methods decorated with @app.route.
 @lru_cache(maxsize=128) # Cache up to 128 unique speech synthesis results. Adjust as needed.
 def _synthesize_speech_cached(text_content, voice_name, language_code):
     """Internal helper to synthesize speech with caching."""
@@ -309,7 +306,8 @@ def _synthesize_speech_cached(text_content, voice_name, language_code):
     )
 
     audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        enable_word_time_offsets=True # Enable word timing offsets for timestamp generation
     )
 
     response = client.synthesize_speech(
@@ -317,18 +315,248 @@ def _synthesize_speech_cached(text_content, voice_name, language_code):
     )
 
     audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
-    return audio_base64
+    return audio_base64, response.word_timings # Return word timings along with audio
 
-# --- NEW: API Endpoint to Synthesize Speech ---
+# --- NEW LOGIC FOR SPEECH SYNTHESIS INTEGRATION ---
+
+MAX_CHAR_COUNT_FOR_NARRATION = 768 # Define max character count for appending narration type paragraphs
+
+def process_paragraphs_for_synthesis(paragraphs_data):
+    """
+    Processes the incoming paragraphs (from frontend JSON) to create a new list of segments
+    optimized for speech synthesis, applying concatenation rules based on paragraph type.
+    Each segment will also include the original paragraph indices it covers.
+    """
+    synthesis_segments = []
+    current_narration_buffer = []
+    current_narration_char_count = 0
+    current_narration_indices = []
+
+    for paragraph in paragraphs_data:
+        text = paragraph.get('text', '').strip()
+        paragraph_type = paragraph.get('paragraph_type', 'narration') # Default to narration
+        original_page_number = paragraph.get('pageNumber')
+        original_paragraph_index_on_page = paragraph.get('paragraphIndexOnPage')
+
+        # Skip empty paragraphs after stripping
+        if not text:
+            continue
+
+        if paragraph_type == 'narration':
+            # Check if adding this narration paragraph exceeds the limit
+            # Add 1 for the space that will be used to join paragraphs if the buffer is not empty
+            potential_new_char_count = current_narration_char_count + len(text) + (1 if current_narration_buffer else 0)
+            
+            if current_narration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
+                # If buffer exists and new text exceeds limit, finalize the current buffer
+                synthesis_segments.append({
+                    "text": " ".join(current_narration_buffer),
+                    "type": "narration",
+                    "original_paragraphs": current_narration_indices
+                })
+                # Start a new buffer with the current paragraph
+                current_narration_buffer = [text]
+                current_narration_char_count = len(text)
+                current_narration_indices = [{
+                    "pageNumber": original_page_number,
+                    "paragraphIndexOnPage": original_paragraph_index_on_page
+                }]
+            else:
+                # Append to current buffer
+                current_narration_buffer.append(text)
+                current_narration_char_count = potential_new_char_count
+                current_narration_indices.append({
+                    "pageNumber": original_page_number,
+                    "paragraphIndexOnPage": original_paragraph_index_on_page
+                })
+
+        else: # Dialogue or Italicized type
+            # If there's an active narration buffer, finalize it before adding non-narration
+            if current_narration_buffer:
+                synthesis_segments.append({
+                    "text": " ".join(current_narration_buffer),
+                    "type": "narration",
+                    "original_paragraphs": current_narration_indices
+                })
+                current_narration_buffer = []
+                current_narration_char_count = 0
+                current_narration_indices = []
+            
+            # Add dialogue or italicized paragraph individually
+            synthesis_segments.append({
+                "text": text,
+                "type": paragraph_type,
+                "original_paragraphs": [{
+                    "pageNumber": original_page_number,
+                    "paragraphIndexOnPage": original_paragraph_index_on_page
+                }]
+            })
+
+    # After loop, if any narration buffer remains, add it to segments
+    if current_narration_buffer:
+        synthesis_segments.append({
+            "text": " ".join(current_narration_buffer),
+            "type": "narration",
+            "original_paragraphs": current_narration_indices
+        })
+    return synthesis_segments
+
+@app.route('/synthesize-chapter-audio', methods=['POST'])
+def synthesize_chapter_audio_endpoint():
+    """
+    Receives JSON data for a chapter (multiple pages), processes it for speech synthesis,
+    synthesizes individual audio segments, merges them per page using pydub,
+    and returns the merged audio for each page.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    # The frontend is sending an array of paragraphs from the current chapter,
+    # which includes pageNumber, paragraphIndexOnPage, paragraphType, and text.
+    chapter_paragraphs_from_frontend = data 
+    
+    # Assuming a default voice and language for now. You might want to pass these from frontend.
+    voice_name = "en-US-Wavenet-D" # Example voice, adjust as needed
+    language_code = "en-US" # Example language, adjust as needed
+
+    if not chapter_paragraphs_from_frontend or not isinstance(chapter_paragraphs_from_frontend, list):
+        return jsonify({"error": "Invalid or empty chapter paragraphs received."}), 400
+
+    app.logger.info(f"Received {len(chapter_paragraphs_from_frontend)} paragraphs for chapter synthesis.")
+
+    # Group paragraphs by page number
+    paragraphs_by_page = {}
+    for p in chapter_paragraphs_from_frontend:
+        page_num = p.get('pageNumber')
+        if page_num not in paragraphs_by_page:
+            paragraphs_by_page[page_num] = []
+        paragraphs_by_page[page_num].append(p)
+    
+    sorted_page_numbers = sorted(paragraphs_by_page.keys())
+    
+    # Prepare responses for each page
+    page_audio_responses = []
+
+    # Implement page-look ahead: process current page + next page
+    # For simplicity, let's process one page at a time for now as requested by the user,
+    # and then discuss "look-ahead" as a refinement.
+    # The current structure of the request implies a full chapter analysis is sent.
+    # If "page-look ahead" means the frontend sends *only* current+next page,
+    # then the frontend request structure would need to change.
+    # For now, I'll process the full chapter, but group by page for output.
+
+    temp_base_dir = None
+    try:
+        temp_base_dir = tempfile.mkdtemp()
+        app.logger.info(f"Created base temporary directory: {temp_base_dir}")
+
+        for page_num in sorted_page_numbers:
+            page_paragraphs = paragraphs_by_page[page_num]
+            
+            segments_to_synthesize = process_paragraphs_for_synthesis(page_paragraphs)
+            
+            if not segments_to_synthesize:
+                app.logger.warning(f"No valid text segments found for synthesis on page {page_num}.")
+                page_audio_responses.append({
+                    "pageNumber": page_num,
+                    "audioContent": None,
+                    "timestamps": [],
+                    "error": "No text to synthesize for this page."
+                })
+                continue
+
+            individual_audio_segments = []
+            page_timestamps = []
+            current_audio_duration_ms = 0
+
+            # Create a temporary directory for this page's audio files
+            page_temp_dir = os.path.join(temp_base_dir, f"page_{page_num}")
+            os.makedirs(page_temp_dir, exist_ok=True)
+            app.logger.info(f"Created temporary directory for page {page_num}: {page_temp_dir}")
+
+            # 2) Perform speech synthesis for each segment and save
+            for i, segment in enumerate(segments_to_synthesize):
+                segment_text = segment['text']
+                
+                if not segment_text.strip():
+                    app.logger.warning(f"Skipping synthesis for empty text segment {i} on page {page_num}.")
+                    continue
+
+                audio_base64, word_timings = _synthesize_speech_cached(segment_text, voice_name, language_code)
+                audio_content = base64.b64decode(audio_base64)
+                
+                # Use pydub to load the audio from bytes
+                audio_segment = AudioSegment.from_file(io.BytesIO(audio_content), format="mp3")
+                individual_audio_segments.append(audio_segment)
+
+                # Generate timestamps for original paragraphs within this segment
+                # This requires careful mapping of word timings back to the original paragraphs
+                # The `process_tts_response_for_timestamps` from previous suggestion would be needed here.
+                # For now, a simplified timestamp based on segment duration:
+                for original_p_info in segment["original_paragraphs"]:
+                    page_timestamps.append({
+                        "pageNumber": original_p_info["pageNumber"],
+                        "paragraphIndexOnPage": original_p_info["paragraphIndexOnPage"],
+                        "start_time_ms": current_audio_duration_ms,
+                        "end_time_ms": current_audio_duration_ms + audio_segment.duration_seconds * 1000
+                    })
+                current_audio_duration_ms += audio_segment.duration_seconds * 1000
+
+            if not individual_audio_segments:
+                app.logger.warning(f"No audio segments generated for page {page_num}.")
+                page_audio_responses.append({
+                    "pageNumber": page_num,
+                    "audioContent": None,
+                    "timestamps": [],
+                    "error": "No audio generated for this page."
+                })
+                continue
+
+            # 3) Merge audio files using pydub
+            merged_audio = AudioSegment.empty()
+            for seg in individual_audio_segments:
+                merged_audio += seg
+
+            # Export the merged audio to a temporary file
+            merged_audio_filename = f"merged_page_{page_num}.mp3"
+            merged_audio_path = os.path.join(page_temp_dir, merged_audio_filename)
+            merged_audio.export(merged_audio_path, format="mp3")
+            app.logger.info(f"Merged audio for page {page_num} saved to: {merged_audio_path}")
+
+            # Read the merged audio file and encode it to base64
+            with open(merged_audio_path, 'rb') as f:
+                merged_audio_content = f.read()
+            merged_audio_base64 = base64.b64encode(merged_audio_content).decode('utf-8')
+
+            page_audio_responses.append({
+                "pageNumber": page_num,
+                "audioContent": merged_audio_base64,
+                "format": "audio/mpeg",
+                "timestamps": page_timestamps # This will need refinement with word timings
+            })
+
+        return jsonify({
+            "success": True,
+            "pageAudioResponses": page_audio_responses,
+            "message": "Chapter audio synthesized and merged per page."
+        })
+
+    except Exception as e:
+        app.logger.error(f"An error occurred during chapter audio synthesis: {e}", exc_info=True)
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+    finally:
+        # Clean up the base temporary directory and its contents
+        if temp_base_dir and os.path.exists(temp_base_dir):
+            shutil.rmtree(temp_base_dir)
+            app.logger.info(f"Cleaned up base temporary directory: {temp_base_dir}")
+
+# --- Existing /synthesize-speech endpoint (can be kept or removed) ---
 @app.route('/synthesize-speech', methods=['POST'])
 def synthesize_speech_endpoint():
-    """
-    API endpoint to synthesize speech using Google Cloud Text-to-Speech.
-    Expects JSON payload with 'text', 'voiceName', 'languageCode'.
-    Returns base64 encoded audio content.
-    Includes caching to prevent duplicate TTS calls.
-    """
-    # Basic request validation
+    # This endpoint can remain for simpler, unchunked synthesis requests if needed,
+    # or you can refactor clients to use '/synthesize-chapter-audio' exclusively.
+    
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
 
@@ -341,13 +569,18 @@ def synthesize_speech_endpoint():
         return jsonify({"error": "Missing required parameters: text, voiceName, or languageCode"}), 400
 
     try:
-        # Call the cached synthesis function
-        audio_base64 = _synthesize_speech_cached(text_content, voice_name, language_code)
+        audio_base64, word_timings = _synthesize_speech_cached(text_content, voice_name, language_code)
 
+        # Returning raw word timings here, as this endpoint doesn't have page/paragraph context
         return jsonify({
             "success": True,
             "audioContent": audio_base64,
-            "format": "audio/mpeg"
+            "format": "audio/mpeg",
+            "wordTimings": [
+                {"word": w.text_content, "start_time_ms": int((w.start_time.seconds + w.start_time.nanos * 1e-9) * 1000),
+                 "end_time_ms": int((w.end_time.seconds + w.end_time.nanos * 1e-9) * 1000)}
+                for w in word_timings
+            ]
         })
 
     except Exception as e:
@@ -356,7 +589,7 @@ def synthesize_speech_endpoint():
             return jsonify({"error": "Failed to synthesize speech: Google Cloud credentials error. See server logs for details."}), 500
         return jsonify({"error": f"Failed to synthesize speech: {str(e)}"}), 500
 
-# --- NEW: API Endpoint to Fetch Google TTS Voices using API Key ---
+# --- Existing /get-google-tts-voices endpoint ---
 @app.route('/get-google-tts-voices', methods=['GET'])
 def get_google_tts_voices_endpoint():
     """
@@ -370,12 +603,9 @@ def get_google_tts_voices_endpoint():
         return jsonify({"error": "Server configuration error: Google API key not set for voice listing."}), 500
 
     try:
-        # Construct the URL for the Google Text-to-Speech v1/voices API
         google_tts_voices_api_url = f"https://texttospeech.googleapis.com/v1/voices?key={google_api_key}"
-        
-        # Make the request to Google's TTS API
         response = requests.get(google_tts_voices_api_url)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         
         return jsonify(response.json())
         
