@@ -1,7 +1,10 @@
 Flask
-google-api-python-client
+Flask-Cors
 google-cloud-texttospeech
+google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 gunicorn
-Flask-Cors
+requests
+beautifulsoup4
+pydub
