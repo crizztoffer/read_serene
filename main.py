@@ -357,7 +357,7 @@ def process_paragraphs_for_synthesis(paragraphs_data):
             # Add 1 for the space that will be used to join paragraphs if the buffer is not empty
             potential_new_char_count = current_narration_char_count + len(text) + (1 if current_narration_buffer else 0)
             
-            if current_naration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
+            if current_narration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
                 # If buffer exists and new text exceeds limit, finalize the current buffer
                 synthesis_segments.append({
                     "text": " ".join(current_narration_buffer),
