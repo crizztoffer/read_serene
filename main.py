@@ -65,8 +65,8 @@ def extract_formatted_html_from_elements(elements):
                     text_style = text_run['textRun'].get('textStyle', {})
 
                     processed_content = content.replace('\x0b', '<br>') \
-                                         .replace('\x85', '<br>') \
-                                         .replace('\n', '<br>') 
+                                             .replace('\x85', '<br>') \
+                                             .replace('\n', '<br>') 
 
                     if text_style.get('bold'):
                         processed_content = f"<strong>{processed_content}</strong>"
@@ -289,7 +289,7 @@ def get_document_content():
         return jsonify({"error": f"Data parsing error: Missing expected key {e} in Google Doc response. Possible permissions issue or empty document."}), 500
     except Exception as e:
         app.logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-        return jsonify({"error": f"An unexpected server error occurred: {e}"}), 500
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 
 # Use lru_cache to cache the synthesis results. Max size can be adjusted.
@@ -513,7 +513,7 @@ def synthesize_chapter_audio_endpoint():
                     cumulative_char_in_segment += paragraph_char_count
                     # Add 1 for space if narration and not last paragraph in segment
                     if segment['type'] == 'narration' and p_meta != segment["original_paragraphs_meta"][-1]:
-                         cumulative_char_in_segment += 1 # Account for space
+                           cumulative_char_in_segment += 1 # Account for space
                     
                     end_time_relative_to_segment = (cumulative_char_in_segment / total_chars_in_segment) * segment_duration_ms if total_chars_in_segment > 0 else 0
 
@@ -551,12 +551,18 @@ def synthesize_chapter_audio_endpoint():
             # Read the merged audio file and encode it to base64
             with open(merged_audio_path, 'rb') as f:
                 merged_audio_content = f.read()
+            
+            # --- NEW DEBUGGING LOGS ---
+            app.logger.info(f"Size of merged audio content for page {page_num}: {len(merged_audio_content)} bytes")
+            app.logger.info(f"First 100 bytes of merged audio for page {page_num}: {merged_audio_content[:100].hex()}")
+            # --- END NEW DEBUGGING LOGS ---
+
             merged_audio_base64 = base64.b64encode(merged_audio_content).decode('utf-8')
 
             page_audio_responses.append({
                 "pageNumber": page_num,
                 "audioContent": merged_audio_base64,
-                "format": "audio/mpeg",
+                "format": "audio/mpeg", # Ensure this matches the actual exported format
                 "timestamps": cumulative_segment_timestamps
             })
 
