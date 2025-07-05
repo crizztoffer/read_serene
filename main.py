@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError # Corrected typo here
+from googleapiclient.errors import HttpError
 from flask_cors import CORS
 import re
 import requests
@@ -463,6 +463,9 @@ def synthesize_chapter_audio_endpoint():
         os.makedirs(page_temp_dir, exist_ok=True)
         app.logger.info(f"Created temporary directory for page {page_num}: {page_temp_dir}")
 
+        # Define silence duration
+        SILENCE_DURATION_MS = 200 # 0.2 seconds
+
         # Perform speech synthesis for each segment and collect pydub objects
         current_page_audio_offset_ms = 0 # Tracks the cumulative time for timestamps on this page
         for i, segment in enumerate(segments_to_synthesize):
@@ -503,6 +506,13 @@ def synthesize_chapter_audio_endpoint():
                 })
             
             current_page_audio_offset_ms += segment_duration_ms
+
+            # Add silence after each segment, except the last one
+            if i < len(segments_to_synthesize) - 1:
+                # Create a silent segment
+                silence_segment = AudioSegment.silent(duration=SILENCE_DURATION_MS, frame_rate=audio_segment_pydub.frame_rate)
+                individual_audio_segments_pydub.append(silence_segment)
+                current_page_audio_offset_ms += SILENCE_DURATION_MS # Account for silence in offset
 
 
         if not individual_audio_segments_pydub:
