@@ -8,7 +8,7 @@ define('RAILWAY_VOICES_API_URL', 'https://readserene-production.up.railway.app/g
 define('RAILWAY_TTS_API_URL', 'https://readserene-production.up.railway.app/synthesize-chapter-audio');
 
 // Include your database connection file. Adjust path if necessary.
-require_once("ato4_kot/dtcol.php"); 
+require_once("ato4_kot/dtcol.php");  //database structure assistance, not needed but still included in case it ever is
 
 ?>
 <!DOCTYPE html>
@@ -92,7 +92,7 @@ require_once("ato4_kot/dtcol.php");
 
     <script>
         // Constants for API URLs
-        const RAILWAY_APP_API_KEY = '122820174430363mom2141989'; 
+        const RAILWAY_APP_API_KEY = 'removed-for-safety'; 
         const RAILWAY_API_URL = 'https://readserene-production.up.railway.app/get-doc-content';
         const RAILWAY_VOICES_API_URL = 'https://readserene-production.up.railway.app/get-google-tts-voices'; 
         const RAILWAY_TTS_API_URL = 'https://readserene-production.up.railway.app/synthesize-chapter-audio'; // Re-enabled in PHP
