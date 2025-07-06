@@ -202,7 +202,7 @@ def get_document_content():
                                 chapter_counter += 1
                                 current_chapter = {
                                     "number": "0", "title": "Introduction", "content": "",
-                                    "id": f"chapter-Lbook_entry['id']}-{chapter_counter}"
+                                    "id": f"chapter-book_entry['id']}-{chapter_counter}"
                                 }
                                 book_entry['chapters'].append(current_chapter)
                             if current_chapter:
