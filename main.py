@@ -27,7 +27,7 @@ CORS(app)
 
 # --- Global dictionary to store synthesis progress ---
 # In a production environment, consider a more robust solution like Redis or a database
-synthesis_progress = {} # NEW: Global dictionary for progress tracking
+synthesis_progress = {} # RE-INTRODUCED: Global dictionary for progress tracking
 
 # --- Google Docs API Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
@@ -202,7 +202,7 @@ def get_document_content():
                                 chapter_counter += 1
                                 current_chapter = {
                                     "number": "0", "title": "Introduction", "content": "",
-                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}"
+                                    "id": f"chapter-Lbook_entry['id']}-{chapter_counter}"
                                 }
                                 book_entry['chapters'].append(current_chapter)
                             if current_chapter:
@@ -327,18 +327,17 @@ def _synthesize_speech_cached(text_content, voice_name, language_code):
 
 # --- NEW LOGIC FOR SPEECH SYNTHESIS INTEGRATION ---
 
-MAX_CHAR_COUNT_FOR_NARRATION = 768 # Define max character count for appending narration type paragraphs
+# This constant will now be used primarily to split *individual* very long paragraphs,
+# ensuring each original paragraph (or its split parts) becomes a synthesis segment.
+MAX_CHAR_COUNT_FOR_NARRATION = 768 
 
 def process_paragraphs_for_synthesis(paragraphs_data):
     """
     Processes the incoming paragraphs (from frontend JSON) to create a new list of segments
-    optimized for speech synthesis, applying concatenation rules based on paragraph type.
-    Each segment will also include the original paragraph indices it covers.
+    for speech synthesis. This revised version ensures that each original paragraph (or a
+    split part of a very long one) forms its own segment for individual synthesis.
     """
     synthesis_segments = []
-    current_narration_buffer = []
-    current_narration_char_count = 0
-    current_narration_original_indices = [] # Stores original page and paragraph indices
 
     for paragraph in paragraphs_data:
         text = paragraph.get('text', '').strip()
@@ -350,62 +349,38 @@ def process_paragraphs_for_synthesis(paragraphs_data):
         if not text:
             continue
 
-        # Store the original paragraph's metadata
-        original_paragraph_meta = {
-            "pageNumber": original_page_number,
-            "paragraphIndexOnPage": original_paragraph_index_on_page,
-            "text": text # Keep original text for timestamp mapping
-        }
-
-        if paragraph_type == 'narration':
-            # Check if adding this narration paragraph exceeds the limit
-            # Add 1 for the space that will be used to join paragraphs if the buffer is not empty
-            potential_new_char_count = current_narration_char_count + len(text) + (1 if current_narration_buffer else 0)
-            
-            if current_narration_buffer and potential_new_char_count > MAX_CHAR_COUNT_FOR_NARRATION:
-                # If buffer exists and new text exceeds limit, finalize the current buffer
+        # If a single paragraph is extremely long, it might need to be split.
+        # This ensures that no single API call exceeds character limits.
+        # For typical paragraphs, this means each original paragraph becomes one segment.
+        if len(text) > MAX_CHAR_COUNT_FOR_NARRATION:
+            # Break down long paragraphs into smaller chunks
+            # This simple split might break words, but it ensures API limits are met.
+            # For more sophisticated splitting (e.g., by sentence), a more advanced NLP library would be needed.
+            chunks = [text[i:i + MAX_CHAR_COUNT_FOR_NARRATION] for i in range(0, len(text), MAX_CHAR_COUNT_FOR_NARRATION)]
+            for j, chunk in enumerate(chunks):
                 synthesis_segments.append({
-                    "text": " ".join(current_narration_buffer),
-                    "type": "narration",
-                    "original_paragraphs_meta": current_narration_original_indices
+                    "text": chunk,
+                    "type": paragraph_type, # Retain original type
+                    "original_paragraphs_meta": [{ # Link back to the single original paragraph
+                        "pageNumber": original_page_number,
+                        "paragraphIndexOnPage": original_paragraph_index_on_page,
+                        "text": chunk # Store the chunk text for proportional timestamping within the chunk
+                    }]
                 })
-                # Start a new buffer with the current paragraph
-                current_narration_buffer = [text]
-                current_narration_char_count = len(text)
-                current_narration_original_indices = [original_paragraph_meta]
-            else:
-                # Append to current buffer
-                current_narration_buffer.append(text)
-                current_narration_char_count = potential_new_char_count
-                current_narration_original_indices.append(original_paragraph_meta)
-
-        else: # Dialogue or Italicized type
-            # If there's an active narration buffer, finalize it before adding non-narration
-            if current_narration_buffer:
-                synthesis_segments.append({
-                    "text": " ".join(current_narration_buffer),
-                    "type": "narration",
-                    "original_paragraphs_meta": current_narration_original_indices
-                })
-                current_narration_buffer = []
-                current_narration_char_count = 0
-                current_narration_original_indices = []
-            
-            # Add dialogue or italicized paragraph individually
+        else:
+            # For paragraphs within the limit, each becomes its own synthesis segment
             synthesis_segments.append({
                 "text": text,
                 "type": paragraph_type,
-                "original_paragraphs_meta": [original_paragraph_meta]
+                "original_paragraphs_meta": [{
+                    "pageNumber": original_page_number,
+                    "paragraphIndexOnPage": original_paragraph_index_on_page,
+                    "text": text # Store original paragraph text
+                }]
             })
-
-    # After loop, if any narration buffer remains, add it to segments
-    if current_narration_buffer:
-        synthesis_segments.append({
-            "text": " ".join(current_narration_buffer),
-            "type": "narration",
-            "original_paragraphs_meta": current_narration_original_indices
-        })
+            
     return synthesis_segments
+
 
 @app.route('/synthesize-chapter-audio', methods=['POST'])
 def synthesize_chapter_audio_endpoint():
@@ -441,11 +416,11 @@ def synthesize_chapter_audio_endpoint():
     # If no paragraphs, page_num will be None, handled by subsequent checks
     page_num = page_paragraphs_from_frontend[0].get('pageNumber') if page_paragraphs_from_frontend else None
 
-    # NEW: Generate a unique task ID for this synthesis request
+    # RE-INTRODUCED: Generate a unique task ID for this synthesis request
     task_id = str(uuid.uuid4())
     app.logger.info(f"Starting synthesis for page {page_num} with task ID: {task_id}")
 
-    # NEW: Initialize progress for this task
+    # RE-INTRODUCED: Initialize progress for this task
     synthesis_progress[task_id] = {
         "status": "pending",
         "current_step": 0,
@@ -462,11 +437,13 @@ def synthesize_chapter_audio_endpoint():
         temp_base_dir = tempfile.mkdtemp()
         app.logger.info(f"Created base temporary directory: {temp_base_dir}")
 
+        # The process_paragraphs_for_synthesis is now designed to return one segment per original paragraph
+        # (or split a very long single paragraph).
         segments_to_synthesize = process_paragraphs_for_synthesis(page_paragraphs_from_frontend)
         
         if not segments_to_synthesize:
             app.logger.warning(f"No valid text segments found for synthesis on page {page_num}.")
-            # NEW: Update progress for no text
+            # Update progress for no text
             synthesis_progress[task_id].update({
                 "status": "completed",
                 "message": "No text to synthesize for this page.",
@@ -477,7 +454,7 @@ def synthesize_chapter_audio_endpoint():
                 "audioContent": None,
                 "timestamps": [],
                 "error": "No text to synthesize for this page.",
-                "taskId": task_id # NEW: Return task ID even for empty case
+                "taskId": task_id # Return task ID even for empty case
             }), 200 # Return 200 as it's a valid empty response for no text
 
         individual_audio_segments_pydub = []
@@ -491,14 +468,13 @@ def synthesize_chapter_audio_endpoint():
         # Define silence duration
         SILENCE_DURATION_MS = 200 # 0.2 seconds
 
-        # NEW: Calculate total steps for page 1 only
-        if page_num == 1:
-            total_synthesis_steps = len(segments_to_synthesize) # One step per synthesis segment
-            total_merging_steps = 1 # One step for final audio merge
-            synthesis_progress[task_id]["total_steps"] = total_synthesis_steps + total_merging_steps
+        # RE-INTRODUCED & MODIFIED: Calculate total steps for page 1 based on the number of *synthesis segments* + 1 for merging
+        # Now, each synthesis segment largely corresponds to an original paragraph (or a part of a very long one).
+        # This will provide more granular updates.
+        if page_num == 1: # Only track progress for the first page synthesis
+            synthesis_progress[task_id]["total_steps"] = len(segments_to_synthesize) + 1 # +1 for the merge step
             synthesis_progress[task_id]["message"] = "Starting audio synthesis..."
             synthesis_progress[task_id]["status"] = "in_progress"
-
 
         # Perform speech synthesis for each segment and collect pydub objects
         current_page_audio_offset_ms = 0 # Tracks the cumulative time for timestamps on this page
@@ -507,8 +483,6 @@ def synthesize_chapter_audio_endpoint():
             
             if not segment_text.strip():
                 app.logger.warning(f"Skipping synthesis for empty text segment {i} on page {page_num}.")
-                if page_num == 1: # NEW: Adjust total_steps if segments are skipped
-                    synthesis_progress[task_id]["total_steps"] -= 1 
                 continue
 
             audio_base64, _ = _synthesize_speech_cached(segment_text, voice_name, language_code) 
@@ -517,35 +491,27 @@ def synthesize_chapter_audio_endpoint():
             audio_segment_pydub = AudioSegment.from_file(io.BytesIO(audio_content_bytes), format="mp3")
             individual_audio_segments_pydub.append(audio_segment_pydub)
 
-            # NEW: Update progress for page 1
+            # RE-INTRODUCED & MODIFIED: Update progress for page 1 after each segment is synthesized
             if page_num == 1:
-                synthesis_progress[task_id]["current_step"] = i + 1
+                synthesis_progress[task_id]["current_step"] = i + 1 # Increment for each *synthesis segment* completed
                 synthesis_progress[task_id]["percent_complete"] = int((synthesis_progress[task_id]["current_step"] / synthesis_progress[task_id]["total_steps"]) * 100)
                 synthesis_progress[task_id]["message"] = f"Synthesizing segment {i+1} of {len(segments_to_synthesize)}..."
                 app.logger.info(f"Progress for task {task_id}: {synthesis_progress[task_id]['percent_complete']}%")
 
+
             # Generate timestamps for the original paragraphs within this *segment*
             # This is the proportionally distributed timestamping.
+            # Since each segment now largely corresponds to one original paragraph,
+            # this part will be simpler, directly mapping the segment's audio to its single original paragraph.
             segment_duration_ms = audio_segment_pydub.duration_seconds * 1000
-            total_chars_in_segment = sum(len(p['text']) for p in segment["original_paragraphs_meta"])
             
-            cumulative_char_in_segment = 0
+            # Assuming original_paragraphs_meta will typically have only one entry now
             for p_meta in segment["original_paragraphs_meta"]:
-                paragraph_char_count = len(p_meta['text'])
-                
-                start_time_relative_to_segment = (cumulative_char_in_segment / total_chars_in_segment) * segment_duration_ms if total_chars_in_segment > 0 else 0
-                cumulative_char_in_segment += paragraph_char_count
-                # Add 1 for space if narration and not last paragraph in segment
-                if segment['type'] == 'narration' and p_meta != segment["original_paragraphs_meta"][-1]:
-                       cumulative_char_in_segment += 1 # Account for space
-                
-                end_time_relative_to_segment = (cumulative_char_in_segment / total_chars_in_segment) * segment_duration_ms if total_chars_in_segment > 0 else 0
-
                 cumulative_segment_timestamps.append({
                     "pageNumber": p_meta['pageNumber'],
                     "paragraphIndexOnPage": p_meta['paragraphIndexOnPage'],
-                    "start_time_ms": int(current_page_audio_offset_ms + start_time_relative_to_segment),
-                    "end_time_ms": int(current_page_audio_offset_ms + end_time_relative_to_segment)
+                    "start_time_ms": int(current_page_audio_offset_ms), # Start of this segment
+                    "end_time_ms": int(current_page_audio_offset_ms + segment_duration_ms) # End of this segment
                 })
             
             current_page_audio_offset_ms += segment_duration_ms
@@ -560,7 +526,7 @@ def synthesize_chapter_audio_endpoint():
 
         if not individual_audio_segments_pydub:
             app.logger.warning(f"No audio segments generated for page {page_num}.")
-            # NEW: Update progress for no audio
+            # Update progress for no audio
             synthesis_progress[task_id].update({
                 "status": "completed",
                 "message": "No audio generated for this page.",
@@ -579,7 +545,7 @@ def synthesize_chapter_audio_endpoint():
         for seg in individual_audio_segments_pydub:
             merged_audio += seg
 
-        # NEW: Update progress for page 1 during merge step
+        # RE-INTRODUCED & MODIFIED: Update progress for page 1 during merge step
         if page_num == 1:
             synthesis_progress[task_id]["current_step"] = synthesis_progress[task_id]["total_steps"] # Set to last step
             synthesis_progress[task_id]["percent_complete"] = 100
@@ -598,7 +564,7 @@ def synthesize_chapter_audio_endpoint():
         
         merged_audio_base64 = base64.b64encode(merged_audio_content).decode('utf-8')
 
-        # NEW: Final progress update for completion
+        # RE-INTRODUCED: Final progress update for completion
         synthesis_progress[task_id].update({
             "status": "completed",
             "message": f"Audio synthesized and merged for page {page_num}.",
@@ -613,12 +579,12 @@ def synthesize_chapter_audio_endpoint():
             "format": "audio/mpeg",
             "timestamps": cumulative_segment_timestamps,
             "message": f"Audio synthesized and merged for page {page_num}.",
-            "taskId": task_id # NEW: Include the task ID in the final response
+            "taskId": task_id # RE-INTRODUCED: Include the task ID in the final response
         })
 
     except Exception as e:
         app.logger.error(f"An error occurred during single page audio synthesis: {e}", exc_info=True)
-        # NEW: Update progress for failure
+        # Update progress for failure
         synthesis_progress[task_id].update({
             "status": "failed",
             "message": f"An error occurred: {str(e)}",
@@ -630,8 +596,13 @@ def synthesize_chapter_audio_endpoint():
         if temp_base_dir and os.path.exists(temp_base_dir):
             shutil.rmtree(temp_base_dir)
             app.logger.info(f"Cleaned up base temporary directory: {temp_base_dir}")
+        # RE-INTRODUCED: Clean up the synthesis_progress entry
+        if task_id in synthesis_progress:
+            del synthesis_progress[task_id]
+            app.logger.info(f"Cleaned up synthesis_progress entry for task ID: {task_id}")
 
-# --- NEW ENDPOINT TO GET SYNTHESIS PROGRESS ---
+
+# RE-INTRODUCED: NEW ENDPOINT TO GET SYNTHESIS PROGRESS ---
 @app.route('/get-synthesis-progress/<task_id>', methods=['GET'])
 def get_synthesis_progress(task_id):
     """
