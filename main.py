@@ -20,9 +20,14 @@ import io # For handling in-memory bytes as files
 import tempfile # For creating temporary files and directories
 import shutil # For cleaning up temporary directories
 import math # For math.isclose for float comparisons
+import uuid # NEW: For generating unique task IDs for progress tracking
 
 app = Flask(__name__)
 CORS(app)
+
+# --- Global dictionary to store synthesis progress ---
+# In a production environment, consider a more robust solution like Redis or a database
+synthesis_progress = {} # NEW: Global dictionary for progress tracking
 
 # --- Google Docs API Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
@@ -436,6 +441,19 @@ def synthesize_chapter_audio_endpoint():
     # If no paragraphs, page_num will be None, handled by subsequent checks
     page_num = page_paragraphs_from_frontend[0].get('pageNumber') if page_paragraphs_from_frontend else None
 
+    # NEW: Generate a unique task ID for this synthesis request
+    task_id = str(uuid.uuid4())
+    app.logger.info(f"Starting synthesis for page {page_num} with task ID: {task_id}")
+
+    # NEW: Initialize progress for this task
+    synthesis_progress[task_id] = {
+        "status": "pending",
+        "current_step": 0,
+        "total_steps": 0,
+        "percent_complete": 0,
+        "message": "Initializing synthesis..."
+    }
+
     app.logger.info(f"Received {len(page_paragraphs_from_frontend)} paragraphs for single page synthesis (Page: {page_num}).")
     app.logger.info(f"Requested voice: {voice_name}, language: {language_code}")
 
@@ -448,11 +466,18 @@ def synthesize_chapter_audio_endpoint():
         
         if not segments_to_synthesize:
             app.logger.warning(f"No valid text segments found for synthesis on page {page_num}.")
+            # NEW: Update progress for no text
+            synthesis_progress[task_id].update({
+                "status": "completed",
+                "message": "No text to synthesize for this page.",
+                "percent_complete": 100
+            })
             return jsonify({
                 "pageNumber": page_num,
                 "audioContent": None,
                 "timestamps": [],
-                "error": "No text to synthesize for this page."
+                "error": "No text to synthesize for this page.",
+                "taskId": task_id # NEW: Return task ID even for empty case
             }), 200 # Return 200 as it's a valid empty response for no text
 
         individual_audio_segments_pydub = []
@@ -466,6 +491,15 @@ def synthesize_chapter_audio_endpoint():
         # Define silence duration
         SILENCE_DURATION_MS = 200 # 0.2 seconds
 
+        # NEW: Calculate total steps for page 1 only
+        if page_num == 1:
+            total_synthesis_steps = len(segments_to_synthesize) # One step per synthesis segment
+            total_merging_steps = 1 # One step for final audio merge
+            synthesis_progress[task_id]["total_steps"] = total_synthesis_steps + total_merging_steps
+            synthesis_progress[task_id]["message"] = "Starting audio synthesis..."
+            synthesis_progress[task_id]["status"] = "in_progress"
+
+
         # Perform speech synthesis for each segment and collect pydub objects
         current_page_audio_offset_ms = 0 # Tracks the cumulative time for timestamps on this page
         for i, segment in enumerate(segments_to_synthesize):
@@ -473,6 +507,8 @@ def synthesize_chapter_audio_endpoint():
             
             if not segment_text.strip():
                 app.logger.warning(f"Skipping synthesis for empty text segment {i} on page {page_num}.")
+                if page_num == 1: # NEW: Adjust total_steps if segments are skipped
+                    synthesis_progress[task_id]["total_steps"] -= 1 
                 continue
 
             audio_base64, _ = _synthesize_speech_cached(segment_text, voice_name, language_code) 
@@ -480,6 +516,13 @@ def synthesize_chapter_audio_endpoint():
             
             audio_segment_pydub = AudioSegment.from_file(io.BytesIO(audio_content_bytes), format="mp3")
             individual_audio_segments_pydub.append(audio_segment_pydub)
+
+            # NEW: Update progress for page 1
+            if page_num == 1:
+                synthesis_progress[task_id]["current_step"] = i + 1
+                synthesis_progress[task_id]["percent_complete"] = int((synthesis_progress[task_id]["current_step"] / synthesis_progress[task_id]["total_steps"]) * 100)
+                synthesis_progress[task_id]["message"] = f"Synthesizing segment {i+1} of {len(segments_to_synthesize)}..."
+                app.logger.info(f"Progress for task {task_id}: {synthesis_progress[task_id]['percent_complete']}%")
 
             # Generate timestamps for the original paragraphs within this *segment*
             # This is the proportionally distributed timestamping.
@@ -517,17 +560,31 @@ def synthesize_chapter_audio_endpoint():
 
         if not individual_audio_segments_pydub:
             app.logger.warning(f"No audio segments generated for page {page_num}.")
+            # NEW: Update progress for no audio
+            synthesis_progress[task_id].update({
+                "status": "completed",
+                "message": "No audio generated for this page.",
+                "percent_complete": 100
+            })
             return jsonify({
                 "pageNumber": page_num,
                 "audioContent": None,
                 "timestamps": [],
-                "error": "No audio generated for this page."
+                "error": "No audio generated for this page.",
+                "taskId": task_id
             }), 200 # Return 200 as it's a valid empty response for no audio
 
         # Merge audio files using pydub
         merged_audio = AudioSegment.empty()
         for seg in individual_audio_segments_pydub:
             merged_audio += seg
+
+        # NEW: Update progress for page 1 during merge step
+        if page_num == 1:
+            synthesis_progress[task_id]["current_step"] = synthesis_progress[task_id]["total_steps"] # Set to last step
+            synthesis_progress[task_id]["percent_complete"] = 100
+            synthesis_progress[task_id]["message"] = "Merging audio segments..."
+            app.logger.info(f"Progress for task {task_id}: {synthesis_progress[task_id]['percent_complete']}%")
 
         # Export the merged audio to a temporary file
         merged_audio_filename = f"merged_page_{page_num}.mp3"
@@ -541,6 +598,13 @@ def synthesize_chapter_audio_endpoint():
         
         merged_audio_base64 = base64.b64encode(merged_audio_content).decode('utf-8')
 
+        # NEW: Final progress update for completion
+        synthesis_progress[task_id].update({
+            "status": "completed",
+            "message": f"Audio synthesized and merged for page {page_num}.",
+            "percent_complete": 100
+        })
+
         # Return a single object for the page's audio response
         return jsonify({
             "success": True,
@@ -548,17 +612,45 @@ def synthesize_chapter_audio_endpoint():
             "audioContent": merged_audio_base64,
             "format": "audio/mpeg",
             "timestamps": cumulative_segment_timestamps,
-            "message": f"Audio synthesized and merged for page {page_num}."
+            "message": f"Audio synthesized and merged for page {page_num}.",
+            "taskId": task_id # NEW: Include the task ID in the final response
         })
 
     except Exception as e:
         app.logger.error(f"An error occurred during single page audio synthesis: {e}", exc_info=True)
+        # NEW: Update progress for failure
+        synthesis_progress[task_id].update({
+            "status": "failed",
+            "message": f"An error occurred: {str(e)}",
+            "percent_complete": 0
+        })
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
     finally:
         # Clean up the base temporary directory and its contents
         if temp_base_dir and os.path.exists(temp_base_dir):
             shutil.rmtree(temp_base_dir)
             app.logger.info(f"Cleaned up base temporary directory: {temp_base_dir}")
+
+# --- NEW ENDPOINT TO GET SYNTHESIS PROGRESS ---
+@app.route('/get-synthesis-progress/<task_id>', methods=['GET'])
+def get_synthesis_progress(task_id):
+    """
+    API endpoint to fetch the current progress of a speech synthesis task.
+    """
+    # --- AUTHENTICATION CHECK ---
+    expected_api_key = os.environ.get('RAILWAY_APP_API_KEY')
+    incoming_api_key = request.headers.get('X-API-Key')
+
+    if not expected_api_key or not incoming_api_key or incoming_api_key != expected_api_key:
+        app.logger.warning(f"Unauthorized access attempt. Incoming key: '{incoming_api_key}' for task {task_id}")
+        return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
+    # --- END AUTHENTICATION CHECK ---
+
+    progress = synthesis_progress.get(task_id)
+    if progress:
+        return jsonify(progress)
+    else:
+        return jsonify({"status": "not_found", "message": "Task ID not found or expired."}), 404
 
 # --- Existing /get-google-tts-voices endpoint ---
 @app.route('/get-google-tts-voices', methods=['GET'])
