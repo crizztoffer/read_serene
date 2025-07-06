@@ -202,7 +202,7 @@ def get_document_content():
                                 chapter_counter += 1
                                 current_chapter = {
                                     "number": "0", "title": "Introduction", "content": "",
-                                    "id": f"chapter-book_entry['id']}-{chapter_counter}"
+                                    "id": f"chapter-{book_entry['id']}-{chapter_counter}" # Corrected this line
                                 }
                                 book_entry['chapters'].append(current_chapter)
                             if current_chapter:
@@ -453,7 +453,7 @@ def synthesize_chapter_audio_endpoint():
                 "pageNumber": page_num,
                 "audioContent": None,
                 "timestamps": [],
-                "error": "No text to synthesize for this page.",
+                "error": "No audio generated for this page.",
                 "taskId": task_id # Return task ID even for empty case
             }), 200 # Return 200 as it's a valid empty response for no text
 
