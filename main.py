@@ -1,4 +1,5 @@
 import os
+from book_index import register_book_index, resolve_document, namespace_books
 import json
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
@@ -116,11 +117,22 @@ def get_document_content():
         return jsonify({"error": "Server configuration error: API key not set."}), 500
 
     if not incoming_api_key or incoming_api_key != expected_api_key:
-        app.logger.warning(f"Unauthorized access attempt. Incoming key: '{incoming_api_key}'")
+        app.logger.warning("Unauthorized access attempt.")
         return jsonify({"error": "Unauthorized access. Invalid API Key."}), 401
     # --- END AUTHENTICATION CHECK ---
 
-    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI' # Confirmed correct ID
+    document_id = '1ubt637f0K87_Och3Pin9GbJM7w6wzf3M2RCmHbmHgYI'
+    registry_id = request.args.get('book_id')
+    if registry_id is not None:
+        try:
+            document_id = resolve_document(registry_id)
+        except ValueError:
+            return jsonify({"error": "book_id must be 128 alphanumeric characters."}), 400
+        except LookupError:
+            return jsonify({"error": "Book not found."}), 404
+        except Exception:
+            app.logger.exception("Book database lookup failed")
+            return jsonify({"error": "Book database unavailable."}), 503
 
     try:
         service = get_docs_service()
@@ -276,6 +288,7 @@ def get_document_content():
 
         parsed_data['books'] = [book for book in parsed_data['books'] if book['chapters']]
 
+        namespace_books(parsed_data, document_id)
         return jsonify(parsed_data)
 
     except HttpError as e:
@@ -593,6 +606,8 @@ def get_google_tts_voices_endpoint():
     except Exception as e:
         app.logger.error(f"An unexpected error occurred while fetching voices: {e}", exc_info=True)
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+register_book_index(app, get_google_cloud_credentials)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
