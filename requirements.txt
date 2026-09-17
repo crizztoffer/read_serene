@@ -8,3 +8,4 @@ gunicorn
 requests
 beautifulsoup4
 pydub
+PyMySQL
